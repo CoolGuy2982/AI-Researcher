@@ -1,0 +1,8 @@
+{
+  "name": "Frontier AI Research Scientist",
+  "description": "A high-precision research tool for defining, refining, and executing scientific experiments at the frontier of knowledge using Gemini Deep Research.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

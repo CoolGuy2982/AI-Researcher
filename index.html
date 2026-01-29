@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Frontier AI Research Scientist</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <style>
+      body {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background-color: #ffffff;
+        color: #1d1d1f;
+        -webkit-font-smoothing: antialiased;
+        overflow: hidden;
+      }
+      .mono { font-family: 'JetBrains Mono', monospace; }
+      ::selection { background: rgba(0, 0, 0, 0.05); }
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 10px; }
+      
+      .glass {
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+      }
+
+      .prose h1, .prose h2, .prose h3 {
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        margin-top: 3rem;
+        margin-bottom: 1rem;
+        color: #9ca3af;
+        border-bottom: 1px solid #f3f4f6;
+        padding-bottom: 0.5rem;
+      }
+      .prose p {
+        font-weight: 300;
+        line-height: 1.7;
+        font-size: 1.05rem;
+        color: #374151;
+        margin-bottom: 1.5rem;
+      }
+      .prose ul, .prose ol {
+        margin-bottom: 1.5rem;
+        padding-left: 1.5rem;
+        font-weight: 300;
+        color: #374151;
+      }
+      .prose li {
+        margin-bottom: 0.5rem;
+      }
+      
+      @keyframes subtle-float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-5px); }
+      }
+      .float-animation {
+        animation: subtle-float 6s ease-in-out infinite;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4",
+    "@google/genai": "https://esm.sh/@google/genai@^1.38.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "markdown-it": "https://esm.sh/markdown-it@^14.1.0",
+    "d3": "https://esm.sh/d3@^7.9.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
