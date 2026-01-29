@@ -8,6 +8,8 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/drive/1OcFUXQEXtVDcQ2masPvyzEocFovvBcrk
 
+Deployed Link: https://frontier-ai-research-scientist-1047350058066.us-west1.run.app/
+
 ## Run Locally
 
 **Prerequisites:**  Node.js
