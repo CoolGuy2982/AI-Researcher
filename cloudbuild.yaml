@@ -1,14 +1,15 @@
 steps:
-  # Step 1: Build the image using your Dockerfile
+  # 1. Build the container
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/frontier-app', '.']
 
-  # Step 2: Push the image to the registry
+  # 2. Push to Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/frontier-app']
 
-  # Step 3: Deploy the specific image to Cloud Run
-  - name: 'gcr.io/cloud-builders/gcloud'
+  # 3. Deploy and inject the Secret
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
@@ -20,8 +21,9 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
+      # This is where the magic happens:
       - '--set-env-vars'
-      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}'
+      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}' 
 
 images:
   - 'gcr.io/$PROJECT_ID/frontier-app'
