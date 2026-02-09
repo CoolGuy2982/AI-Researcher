@@ -1,7 +1,18 @@
 
 import { GoogleGenAI, Type, FunctionDeclaration, GenerateContentResponse } from "@google/genai";
 
-const getClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getClient = () => {
+  // Check for runtime injected key (Cloud Run) or build-time key (Local)
+  const apiKey = (window as any).ENV?.GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
+  
+  if (!apiKey) {
+    console.error("CRITICAL: GEMINI_API_KEY is missing. Please set it in Cloud Run.");
+    // We don't throw immediately to allow the UI to potentially handle it, 
+    // but the SDK will likely fail if we pass undefined.
+  }
+  
+  return new GoogleGenAI({ apiKey });
+};
 
 /**
  * Robust retry wrapper with exponential backoff.
