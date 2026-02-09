@@ -180,12 +180,25 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
           } else if (fc.name === 'initiate_deep_research') {
             deepResearchHypothesis = (fc.args as any).final_hypothesis;
             latestStatus = ExperimentStatus.RESEARCHING;
-            toolResponses.push({ id: fc.id, name: fc.name, response: { result: "Research Protocol Initiated." } });
+            toolResponses.push({ id: fc.id, name: fc.name, response: { result: "Research Protocol Initiated. Commencing Phase 1: Deep Research Synthesis." } });
           }
         }
 
-        onUpdate({ ...experiment, graphNodes: latestNodes, graphEdges: latestEdges, status: latestStatus, lastModifiedAt: Date.now() });
-        response = await chat.sendMessage({ message: { role: 'user', parts: toolResponses.map(tr => ({ functionResponse: { id: tr.id, name: tr.name, response: tr.response } })) } });
+        onUpdate({ 
+          ...experiment, 
+          graphNodes: latestNodes, 
+          graphEdges: latestEdges, 
+          status: latestStatus, 
+          lastModifiedAt: Date.now() 
+        });
+
+        // Continue the conversation if there are tool responses
+        response = await chat.sendMessage({ 
+          message: { 
+            role: 'user', 
+            parts: toolResponses.map(tr => ({ functionResponse: { id: tr.id, name: tr.name, response: tr.response } })) 
+          } 
+        });
         loopCount++;
       }
 
@@ -197,12 +210,23 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         groundingUrls: response.candidates?.[0]?.groundingMetadata?.groundingChunks?.filter((c: any) => c.web).map((c: any) => ({ title: c.web.title || c.web.uri, uri: c.web.uri }))
       };
 
-      const finalExp: Experiment = { ...experiment, chatHistory: [...experiment.chatHistory, modelMsg], graphNodes: latestNodes, graphEdges: latestEdges, status: latestStatus, lastModifiedAt: Date.now() };
+      const finalExp: Experiment = { 
+        ...experiment, 
+        chatHistory: [...experiment.chatHistory, modelMsg], 
+        graphNodes: latestNodes, 
+        graphEdges: latestEdges, 
+        status: latestStatus, 
+        lastModifiedAt: Date.now() 
+      };
+      
       onUpdate(finalExp);
 
+      // CRITICAL FIX: Trigger Deep Research and STOP this function.
+      // Do NOT trigger coding agent here; executeDeepResearch will trigger Phase 2.
       if (latestStatus === ExperimentStatus.RESEARCHING) {
         await executeDeepResearch(finalExp, deepResearchHypothesis);
       }
+      
     } catch (err: any) {
       if (err.message?.includes("Requested entity was not found")) { await handleEntityNotFound(); return; }
       onUpdate({ ...experiment, chatHistory: [...experiment.chatHistory, { id: crypto.randomUUID(), role: 'model', content: `Synthesis interrupted: ${err.message || String(err)}`, timestamp: Date.now() }] });
@@ -219,12 +243,13 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       const aistudio = (window as any).aistudio;
       if (aistudio && !(await aistudio.hasSelectedApiKey())) { await handleEntityNotFound(); return; }
 
-      const stream = await performDeepResearchStream(exp.chatHistory.map(m => `${m.role}: ${m.content}`).join('\n'), hypothesis);
+      // Get the current chat history for context
+      const context = exp.chatHistory.map(m => `${m.role}: ${m.content}`).join('\n');
+      const stream = await performDeepResearchStream(context, hypothesis);
       
       for await (const chunk of stream) {
         if (!chunk) continue;
         
-        // Handle Interactions API chunk structure
         if (chunk.event_type === 'content.delta') {
           if (chunk.delta.type === 'text') {
             fullText += chunk.delta.text;
@@ -253,6 +278,8 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       };
 
       onUpdate(finalWithReport);
+      
+      // TRIGGER PHASE 2: Coder Agent execution
       await executeResearch(finalWithReport, hypothesis);
 
     } catch (err: any) {
@@ -305,7 +332,9 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
   const executeResearch = async (exp: Experiment, hypothesis: string) => {
     setToolActivities([]);
     try {
+      // Pass both the previous chat and the newly generated Synthesis Report as the prompt/context
       const chatSummary = exp.chatHistory.map(m => `${m.role === 'user' ? 'Human' : 'AI'}: ${m.content}`).join('\n\n') + (exp.report ? `\n\nSYNTHESIS REPORT:\n${exp.report.fullContent}` : '');
+      
       onUpdate({ ...exp, executionStatus: ResearchExecutionStatus.RUNNING });
       const stream = await startResearch({ experimentId: exp.id, hypothesis, experimentTitle: exp.title, chatSummary });
       await consumeEventStream(stream, exp);
