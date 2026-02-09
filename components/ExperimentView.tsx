@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Experiment, ExperimentStatus, ResearchExecutionStatus, Message, GraphNode, GraphEdge, ToolActivity, CliStreamEvent } from '../types';
-import { createRefinementChat } from '../services/gemini';
+import { createRefinementChat, performDeepResearchStream } from '../services/gemini';
 import { startResearch, sendResearchChat, abortResearch, getFindings, executeScript } from '../services/research-api';
 import KnowledgeGraph from './KnowledgeGraph';
 import MarkdownRenderer from './MarkdownRenderer';
@@ -82,7 +82,6 @@ const ScientificLoader: React.FC = () => {
   );
 };
 
-// Terminal output panel for script execution
 const TerminalOutput: React.FC<{ lines: { stream: string; line: string }[]; exitCode: number | null; onClose: () => void }> = ({ lines, exitCode, onClose }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -133,7 +132,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
   const chat = useMemo(() => createRefinementChat(), []);
 
-  // New state for CLI-backed research
   const [rightPanel, setRightPanel] = useState<RightPanel>('graph');
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -160,7 +158,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [experiment.chatHistory, isLoading, toolActivities]);
+  }, [experiment.chatHistory, isLoading, toolActivities, experiment.researchProgress]);
 
   const handleEntityNotFound = async () => {
     const aistudio = (window as any).aistudio;
@@ -188,7 +186,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     setIsLoading(false);
   };
 
-  // === Refinement chat (Phase 1 — unchanged, uses direct Gemini API) ===
   const processTurn = async (text: string) => {
     if (isLoading) return;
     setIsLoading(true);
@@ -290,9 +287,9 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
       onUpdate(finalExp);
 
-      // === Transition to Phase 2: CLI-backed research ===
+      // Trigger Step 1 of Research: Deep Synthesis Report
       if (latestStatus === ExperimentStatus.RESEARCHING) {
-        await executeResearch(finalExp, deepResearchHypothesis);
+        await executeDeepResearch(finalExp, deepResearchHypothesis);
       }
     } catch (err: any) {
       console.error("Turn failure:", err);
@@ -318,7 +315,69 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
-  // === Helpers: format tool events as readable chat messages ===
+  const executeDeepResearch = async (exp: Experiment, hypothesis: string) => {
+    let fullText = "";
+    let browsing: string[] = [];
+
+    try {
+      const aistudio = (window as any).aistudio;
+      if (aistudio && !(await aistudio.hasSelectedApiKey())) {
+        await handleEntityNotFound();
+        return;
+      }
+
+      const stream = await performDeepResearchStream(
+        exp.chatHistory.map(m => `${m.role}: ${m.content}`).join('\n'), 
+        hypothesis
+      );
+      
+      for await (const chunk of stream) {
+        if (!chunk) continue;
+        
+        const text = chunk.text;
+        if (text) fullText += text;
+
+        const grounding = chunk.candidates?.[0]?.groundingMetadata;
+        if (grounding?.groundingChunks) {
+          const newUrls = grounding.groundingChunks
+            .filter((c: any) => c.web?.uri)
+            .map((c: any) => c.web.uri);
+          browsing = Array.from(new Set([...browsing, ...newUrls]));
+        }
+
+        onUpdate({
+          ...exp,
+          researchProgress: {
+            browsing,
+            thoughts: "Autonomous synthesis in progress..."
+          },
+          lastModifiedAt: Date.now()
+        });
+      }
+
+      const finalWithReport: Experiment = {
+        ...exp,
+        researchProgress: undefined,
+        report: {
+          summary: "Frontier Synthesis Complete",
+          hypothesis,
+          fullContent: fullText || "Autonomous research protocol concluded. Final synthesis refined.",
+          citations: browsing
+        },
+        lastModifiedAt: Date.now()
+      };
+
+      onUpdate(finalWithReport);
+
+      // Trigger Step 2 of Research: Coding & CLI Execution
+      await executeResearch(finalWithReport, hypothesis);
+
+    } catch (err: any) {
+      console.error("Deep research failure:", err);
+      onUpdate({ ...exp, status: ExperimentStatus.FAILED });
+    }
+  };
+
   const formatToolUseMessage = (toolName: string, params?: Record<string, any>): string | null => {
     switch (toolName) {
       case 'google_web_search':
@@ -345,7 +404,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
     switch (toolName) {
       case 'google_web_search':
-        return null; // search results are verbose, the tool_use message is enough
+        return null;
       case 'write_file':
         return `File written successfully.`;
       case 'run_shell_command': {
@@ -355,15 +414,13 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         return `Output (${lines.length} lines): ${lines.slice(0, 2).join('\n')}...`;
       }
       default:
-        return null; // suppress verbose results for other tools
+        return null;
     }
   };
 
-  // === Phase 2: CLI-backed research execution ===
   const consumeEventStream = async (stream: ReadableStream<CliStreamEvent>, exp: Experiment) => {
-    // Cancel any previous reader so we don't have competing consumers
     if (activeReaderRef.current) {
-      try { activeReaderRef.current.cancel(); } catch { /* already closed */ }
+      try { activeReaderRef.current.cancel(); } catch { /* ignore */ }
     }
     const reader = stream.getReader();
     activeReaderRef.current = reader;
@@ -387,7 +444,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
               status: 'running',
               startedAt: Date.now(),
             }]);
-            // Surface tool call as a chat message
             const toolLabel = formatToolUseMessage(event.tool_name || 'unknown', event.parameters);
             if (toolLabel) {
               const toolMsg: Message = {
@@ -409,7 +465,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
                 ? { ...a, status: (event.status === 'success' ? 'success' : 'error') as 'success' | 'error', output: event.output, completedAt: Date.now() }
                 : a
             ));
-            // Surface tool result as a chat message
             const resultLabel = formatToolResultMessage(event.tool_name || 'unknown', event.status || '', event.output);
             if (resultLabel) {
               const resultMsg: Message = {
@@ -440,12 +495,9 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
           case 'done': {
             const finalStatus = event.status === 'completed' ? ResearchExecutionStatus.COMPLETED : ResearchExecutionStatus.FAILED;
-            
-            // Retry fetching findings to ensure we capture the file if it was just written
             let findings = await getFindings(exp.id);
             
             if (!findings && finalStatus === ResearchExecutionStatus.COMPLETED) {
-              // Poll briefly to handle filesystem latency
               for (let i = 0; i < 5; i++) {
                 await new Promise(r => setTimeout(r, 1000));
                 findings = await getFindings(exp.id);
@@ -481,9 +533,10 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     setToolActivities([]);
 
     try {
+      // Pass both the chat and the Synthesis Report to the coder agent
       const chatSummary = exp.chatHistory
         .map(m => `${m.role === 'user' ? 'Human' : 'AI'}: ${m.content}`)
-        .join('\n\n');
+        .join('\n\n') + (exp.report ? `\n\nSYNTHESIS REPORT:\n${exp.report.fullContent}` : '');
 
       onUpdate({ ...exp, executionStatus: ResearchExecutionStatus.RUNNING });
 
@@ -501,7 +554,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
-  // === Follow-up chat during/after research ===
   const handleResearchChat = async (message: string) => {
     if (!message.trim()) return;
     setIsLoading(true);
@@ -532,7 +584,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
-  // === Script execution from file browser ===
   const handleRunScript = async (scriptPath: string) => {
     const ext = scriptPath.split('.').pop()?.toLowerCase();
     const command = ext === 'sh' ? `sh ${scriptPath}` : `python ${scriptPath}`;
@@ -561,10 +612,8 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
-    // During research, allow interjections even if a stream is active
     if (isLoading && !isResearchRunning) return;
 
-    // Route to appropriate handler based on experiment state
     if (experiment.status === ExperimentStatus.RESEARCHING || experiment.status === ExperimentStatus.COMPLETED) {
       handleResearchChat(input);
     } else {
@@ -621,11 +670,50 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
               )
             ))}
 
-            {isLoading && toolActivities.length === 0 && !isResearchRunning && (
+            {isLoading && toolActivities.length === 0 && !isResearchRunning && !experiment.researchProgress && (
               <ScientificLoader />
             )}
 
-            {/* Tool activity feed during research */}
+            {/* Step 1 Progress: Autonomous Synthesis */}
+            {experiment.researchProgress && (
+              <div className="p-8 glass rounded-[32px] border border-gray-100 shadow-[0_20px_60px_rgba(0,0,0,0.02)] animate-in zoom-in-98 duration-500 relative overflow-hidden group/card">
+                <div className="absolute top-0 left-0 w-full h-[1px] bg-gray-50 overflow-hidden">
+                  <div className="h-full bg-black/40 animate-progress-minimal w-1/3 rounded-full"></div>
+                </div>
+
+                <div className="flex items-start justify-between mb-8">
+                  <div className="space-y-1">
+                    <div className="text-[9px] uppercase tracking-[0.4em] font-black text-black">Autonomous Synthesis</div>
+                    <div className="text-[8px] text-gray-400 uppercase tracking-widest font-bold flex items-center gap-1.5">
+                      <span className="w-1 h-1 rounded-full bg-blue-400 animate-pulse"></span>
+                      Real-time Browsing
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-8">
+                  {experiment.researchProgress.browsing.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="text-[8px] uppercase tracking-widest text-gray-300 font-bold px-1">Network Sources</div>
+                      <div className="flex flex-wrap gap-2">
+                        {experiment.researchProgress.browsing.slice(-6).map((url, i) => (
+                          <div key={i} className="flex items-center gap-2 px-2.5 py-1 bg-white border border-gray-50 rounded-lg shadow-[0_1px_2px_rgba(0,0,0,0.01)] animate-in fade-in slide-in-from-right-1">
+                            <img src={`https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=32`} className="w-3 h-3 grayscale opacity-40" alt="" />
+                            <span className="text-[9px] text-gray-500 font-medium truncate max-w-[120px]">{new URL(url).hostname}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[8px] text-gray-300 font-black uppercase tracking-[0.2em] animate-pulse">Compiling frontier data</span>
+                    <span className="text-[8px] text-gray-200 mono">Live</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Step 2 Progress: Coder Agent CLI */}
             {(isResearchRunning || toolActivities.length > 0) && (
               <div className="space-y-4">
                 <ToolActivityFeed activities={toolActivities} />
@@ -642,24 +730,8 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
               </div>
             )}
 
-            {/* Findings display after completion */}
-            {experiment.findingsContent && experiment.status === ExperimentStatus.COMPLETED && (
-              <div className="bg-white p-10 sm:p-16 rounded-[48px] border border-gray-100 shadow-[0_30px_100px_rgba(0,0,0,0.04)] animate-in slide-in-from-bottom-6 duration-1000">
-                <div className="text-[9px] uppercase tracking-[0.6em] font-black text-black mb-12 pb-6 border-b border-gray-50 flex items-center justify-between">
-                  Research Findings
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
-                    <span className="text-[8px] tracking-widest text-gray-400 uppercase">Complete</span>
-                  </div>
-                </div>
-                <div className="prose prose-md max-w-none text-gray-700">
-                  <MarkdownRenderer content={experiment.findingsContent} experimentId={experiment.id} />
-                </div>
-              </div>
-            )}
-
-            {/* Legacy report display (for old experiments) */}
-            {experiment.report && !experiment.findingsContent && (
+            {/* Report Display (Visible after Step 1) */}
+            {experiment.report && (
               <div className="bg-white p-10 sm:p-16 rounded-[48px] border border-gray-100 shadow-[0_30px_100px_rgba(0,0,0,0.04)] animate-in slide-in-from-bottom-6 duration-1000">
                 <div className="text-[9px] uppercase tracking-[0.6em] font-black text-black mb-12 pb-6 border-b border-gray-50 flex items-center justify-between">
                   Synthesis Report
@@ -677,19 +749,22 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
                 <div className="prose prose-md max-w-none text-gray-700">
                   <MarkdownRenderer content={experiment.report.fullContent} />
                 </div>
-                {experiment.report.citations && experiment.report.citations.length > 0 && (
-                  <div className="mt-16 pt-8 border-t border-gray-50">
-                     <h5 className="text-[8px] uppercase tracking-widest text-gray-300 font-bold mb-6">Scientific Citations</h5>
-                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {experiment.report.citations.map((url, i) => (
-                          <a key={i} href={url} target="_blank" rel="noreferrer" className="flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-all border border-transparent hover:border-gray-100 group">
-                             <img src={`https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=32`} className="w-3.5 h-3.5 grayscale opacity-50 group-hover:grayscale-0 group-hover:opacity-100" alt="" />
-                             <span className="text-[10px] text-gray-500 font-medium truncate">{new URL(url).hostname}</span>
-                          </a>
-                        ))}
-                     </div>
+              </div>
+            )}
+
+            {/* Findings Display (Visible after Step 2) */}
+            {experiment.findingsContent && experiment.status === ExperimentStatus.COMPLETED && (
+              <div className="bg-white p-10 sm:p-16 rounded-[48px] border border-gray-100 shadow-[0_30px_100px_rgba(0,0,0,0.04)] animate-in slide-in-from-bottom-6 duration-1000">
+                <div className="text-[9px] uppercase tracking-[0.6em] font-black text-black mb-12 pb-6 border-b border-gray-50 flex items-center justify-between">
+                  Research Findings
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                    <span className="text-[8px] tracking-widest text-gray-400 uppercase">Complete</span>
                   </div>
-                )}
+                </div>
+                <div className="prose prose-md max-w-none text-gray-700">
+                  <MarkdownRenderer content={experiment.findingsContent} experimentId={experiment.id} />
+                </div>
               </div>
             )}
           </div>
@@ -736,18 +811,15 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         )}
       </div>
 
-      {/* Right Panel with Tab Switcher */}
+      {/* Right Panel */}
       <div className="w-[48%] bg-[#fcfcfc] overflow-hidden select-none border-l border-gray-50 relative flex flex-col">
-        {/* Tab Switcher */}
         <div className="flex items-center gap-0 border-b border-gray-100 bg-white">
           {(['graph', 'workspace', 'findings'] as RightPanel[]).map((tab) => (
             <button
               key={tab}
               onClick={() => { setRightPanel(tab); setSelectedFile(null); }}
               className={`flex-1 py-3 text-[9px] uppercase tracking-[0.3em] font-bold transition-all border-b-2 ${
-                rightPanel === tab
-                  ? 'text-black border-black'
-                  : 'text-gray-300 border-transparent hover:text-gray-500'
+                rightPanel === tab ? 'text-black border-black' : 'text-gray-300 border-transparent hover:text-gray-500'
               }`}
             >
               {tab === 'graph' ? 'Knowledge Lattice' : tab === 'workspace' ? 'Workspace' : 'Findings'}
@@ -755,7 +827,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
           ))}
         </div>
 
-        {/* Panel Content */}
         <div className="flex-1 overflow-hidden">
           {rightPanel === 'graph' && (
             <KnowledgeGraph nodes={experiment.graphNodes} edges={experiment.graphEdges} />
@@ -785,7 +856,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         </div>
       </div>
 
-      {/* Terminal Output Modal */}
       {terminalOutput && (
         <TerminalOutput
           lines={terminalOutput.lines}
@@ -799,9 +869,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
           0% { transform: translateX(-100%); }
           100% { transform: translateX(300%); }
         }
-        .animate-progress-minimal {
-          animation: progress-minimal 3.5s infinite cubic-bezier(0.4, 0, 0.2, 1);
-        }
+        .animate-progress-minimal { animation: progress-minimal 3.5s infinite cubic-bezier(0.4, 0, 0.2, 1); }
         @keyframes breathing-core {
           0%, 100% { transform: scale(0.8); opacity: 0.1; }
           50% { transform: scale(1.4); opacity: 0.3; }
