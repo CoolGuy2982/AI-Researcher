@@ -7,7 +7,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/frontier-app']
 
-  # 3. Deploy and inject the Secret
+  # 3. Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -21,9 +21,12 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
-      # This is where the magic happens:
       - '--set-env-vars'
-      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}' 
+      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}'
 
 images:
   - 'gcr.io/$PROJECT_ID/frontier-app'
+
+# THIS FIXES THE LOGGING ERROR
+options:
+  logging: CLOUD_LOGGING_ONLY
