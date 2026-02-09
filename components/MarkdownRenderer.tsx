@@ -10,15 +10,25 @@ const md = new MarkdownIt({
 
 interface MarkdownRendererProps {
   content: string;
+  experimentId?: string;
 }
 
-const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
+const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, experimentId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (containerRef.current) {
+      // Rewrite relative image paths to workspace API URLs
+      let processed = content;
+      if (experimentId) {
+        processed = processed.replace(
+          /!\[([^\]]*)\]\((?!https?:\/\/)([^)]+)\)/g,
+          (_, alt, src) => `![${alt}](/api/workspace/${experimentId}/file?path=${encodeURIComponent(src)})`
+        );
+      }
+
       // Basic KaTeX manual processing for $...$ and $$...$$
-      let processed = content
+      processed = processed
         .replace(/\$\$(.*?)\$\$/gs, (_, formula) => {
           try { return `<div class="katex-display">${(window as any).katex.renderToString(formula, { displayMode: true })}</div>`; }
           catch (e) { return formula; }

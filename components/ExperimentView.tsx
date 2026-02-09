@@ -1,10 +1,14 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Experiment, ExperimentStatus, Message, GraphNode, GraphEdge } from '../types';
-import { createRefinementChat, performDeepResearchStream } from '../services/gemini';
+import { Experiment, ExperimentStatus, ResearchExecutionStatus, Message, GraphNode, GraphEdge, ToolActivity, CliStreamEvent } from '../types';
+import { createRefinementChat } from '../services/gemini';
+import { startResearch, sendResearchChat, abortResearch, getFindings, executeScript } from '../services/research-api';
 import KnowledgeGraph from './KnowledgeGraph';
 import MarkdownRenderer from './MarkdownRenderer';
-import { GenerateContentResponse } from "@google/genai";
+import FileBrowser from './FileBrowser';
+import FileViewer from './FileViewer';
+import FindingsView from './FindingsView';
+import ToolActivityFeed from './ToolActivityFeed';
 
 interface ExperimentViewProps {
   experiment: Experiment;
@@ -18,7 +22,7 @@ const SourceAccordion: React.FC<{ sources: { title: string; uri: string }[] }> =
 
   return (
     <div className="mt-6 border border-gray-100 rounded-2xl overflow-hidden glass shadow-sm transition-all duration-300">
-      <button 
+      <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between px-5 py-3 text-[9px] uppercase tracking-widest font-bold text-gray-400 hover:bg-white/50 transition-colors"
       >
@@ -34,11 +38,11 @@ const SourceAccordion: React.FC<{ sources: { title: string; uri: string }[] }> =
           {sources.map((url, i) => {
             const domain = new URL(url.uri).hostname.replace('www.', '');
             return (
-              <a 
-                key={i} 
-                href={url.uri} 
-                target="_blank" 
-                rel="noreferrer" 
+              <a
+                key={i}
+                href={url.uri}
+                target="_blank"
+                rel="noreferrer"
                 className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-white transition-all border border-transparent hover:border-gray-50 group/item"
               >
                 <div className="w-8 h-8 rounded-lg bg-gray-50 flex items-center justify-center group-hover/item:bg-white transition-colors">
@@ -79,14 +83,64 @@ const ScientificLoader: React.FC = () => {
   );
 };
 
+// Terminal output panel for script execution
+const TerminalOutput: React.FC<{ lines: { stream: string; line: string }[]; exitCode: number | null; onClose: () => void }> = ({ lines, exitCode, onClose }) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [lines]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 bg-black/20 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="w-full max-w-3xl bg-gray-950 rounded-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
+        <div className="flex items-center justify-between px-4 py-3 bg-gray-900">
+          <span className="text-[10px] mono text-gray-400 uppercase tracking-wider">Terminal Output</span>
+          <div className="flex items-center gap-3">
+            {exitCode !== null && (
+              <span className={`text-[9px] mono ${exitCode === 0 ? 'text-green-400' : 'text-red-400'}`}>
+                exit: {exitCode}
+              </span>
+            )}
+            <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div ref={scrollRef} className="p-4 max-h-[400px] overflow-y-auto">
+          {lines.map((l, i) => (
+            <div key={i} className={`text-[12px] mono leading-relaxed ${l.stream === 'stderr' ? 'text-red-400' : 'text-green-300'}`}>
+              {l.line}
+            </div>
+          ))}
+          {exitCode === null && (
+            <div className="text-[12px] mono text-gray-500 animate-pulse">Running...</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+type RightPanel = 'graph' | 'workspace' | 'findings';
+
 const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate }) => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  
+  const activeReaderRef = useRef<ReadableStreamDefaultReader<CliStreamEvent> | null>(null);
+
   const chat = useMemo(() => createRefinementChat(), []);
+
+  // New state for CLI-backed research
+  const [rightPanel, setRightPanel] = useState<RightPanel>('graph');
+  const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [terminalOutput, setTerminalOutput] = useState<{ lines: { stream: string; line: string }[]; exitCode: number | null } | null>(null);
+
+  const isResearchRunning = experiment.executionStatus === ResearchExecutionStatus.RUNNING;
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -107,7 +161,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [experiment.chatHistory, isLoading, experiment.researchProgress]);
+  }, [experiment.chatHistory, isLoading, toolActivities]);
 
   const handleEntityNotFound = async () => {
     const aistudio = (window as any).aistudio;
@@ -122,23 +176,24 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
-  const cancelResearch = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+  const cancelResearch = async () => {
+    try {
+      await abortResearch(experiment.id);
+    } catch { /* ignore */ }
     onUpdate({
       ...experiment,
       status: ExperimentStatus.DEFINING,
+      executionStatus: ResearchExecutionStatus.ABORTED,
       researchProgress: undefined
     });
     setIsLoading(false);
   };
 
+  // === Refinement chat (Phase 1 — unchanged, uses direct Gemini API) ===
   const processTurn = async (text: string) => {
     if (isLoading) return;
     setIsLoading(true);
-    
+
     let latestNodes = [...experiment.graphNodes];
     let latestEdges = [...experiment.graphEdges];
     let latestStatus = experiment.status;
@@ -146,7 +201,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
     try {
       let response = await chat.sendMessage({ message: text });
-      
+
       let loopCount = 0;
       const MAX_LOOPS = 8;
 
@@ -165,7 +220,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
             }
             if (args.edges) {
               const existingIds = new Set(latestNodes.map(n => n.id));
-              const validNewEdges = (args.edges as GraphEdge[]).filter(e => 
+              const validNewEdges = (args.edges as GraphEdge[]).filter(e =>
                 existingIds.has(e.source) && existingIds.has(e.target)
               );
               latestEdges = [...latestEdges, ...validNewEdges];
@@ -195,7 +250,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
           lastModifiedAt: Date.now()
         });
 
-        response = await chat.sendMessage({ 
+        response = await chat.sendMessage({
           message: {
             role: 'user',
             parts: toolResponses.map(tr => ({
@@ -203,7 +258,7 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
             }))
           }
         });
-        
+
         loopCount++;
       }
 
@@ -236,8 +291,9 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
       onUpdate(finalExp);
 
+      // === Transition to Phase 2: CLI-backed research ===
       if (latestStatus === ExperimentStatus.RESEARCHING) {
-        await executeDeepResearch(finalExp, deepResearchHypothesis);
+        await executeResearch(finalExp, deepResearchHypothesis);
       }
     } catch (err: any) {
       console.error("Turn failure:", err);
@@ -252,8 +308,8 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       const errorMsg: Message = {
         id: crypto.randomUUID(),
         role: 'model',
-        content: isRateLimit 
-          ? "The frontier is currently overloaded (Rate Limit Exceeded). Synthesis will resume shortly once the protocol stabilizes." 
+        content: isRateLimit
+          ? "The frontier is currently overloaded (Rate Limit Exceeded). Synthesis will resume shortly once the protocol stabilizes."
           : `Synthesis interrupted: ${err.message || String(err)}. Check project permissions or network.`,
         timestamp: Date.now()
       };
@@ -263,88 +319,254 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
-  const executeDeepResearch = async (exp: Experiment, hypothesis: string) => {
-    let fullText = "";
-    let browsing: string[] = [];
-    let thought = "";
+  // === Helpers: format tool events as readable chat messages ===
+  const formatToolUseMessage = (toolName: string, params?: Record<string, any>): string | null => {
+    switch (toolName) {
+      case 'google_web_search':
+        return `Searching for: ${params?.query || params?.search_query || 'research literature'}`;
+      case 'web_fetch':
+        return `Reading: ${params?.url || 'web page'}`;
+      case 'write_file':
+        return `Writing file: ${params?.path || params?.file_path || 'file'}`;
+      case 'edit_file':
+        return `Editing file: ${params?.path || params?.file_path || 'file'}`;
+      case 'read_file':
+        return `Reading file: ${params?.path || params?.file_path || 'file'}`;
+      case 'run_shell_command':
+        return `Running: \`${params?.command || params?.shell_command || 'command'}\``;
+      default:
+        return `Using tool: ${toolName}`;
+    }
+  };
+
+  const formatToolResultMessage = (toolName: string, status: string, output?: string): string | null => {
+    if (status !== 'success') {
+      const preview = output ? output.slice(0, 200) : 'Unknown error';
+      return `Tool error (${toolName}): ${preview}`;
+    }
+    switch (toolName) {
+      case 'google_web_search':
+        return null; // search results are verbose, the tool_use message is enough
+      case 'write_file':
+        return `File written successfully.`;
+      case 'run_shell_command': {
+        if (!output) return `Command completed.`;
+        const lines = output.split('\n').filter(l => l.trim());
+        if (lines.length <= 3) return `Output: ${output.trim()}`;
+        return `Output (${lines.length} lines): ${lines.slice(0, 2).join('\n')}...`;
+      }
+      default:
+        return null; // suppress verbose results for other tools
+    }
+  };
+
+  // === Phase 2: CLI-backed research execution ===
+  const consumeEventStream = async (stream: ReadableStream<CliStreamEvent>, exp: Experiment) => {
+    // Cancel any previous reader so we don't have competing consumers
+    if (activeReaderRef.current) {
+      try { activeReaderRef.current.cancel(); } catch { /* already closed */ }
+    }
+    const reader = stream.getReader();
+    activeReaderRef.current = reader;
 
     try {
-      const aistudio = (window as any).aistudio;
-      if (aistudio && !(await aistudio.hasSelectedApiKey())) {
-        await handleEntityNotFound();
-        return;
-      }
+      while (true) {
+        const { done, value: event } = await reader.read();
+        if (done) break;
 
-      // Stream type is correctly inferred from performDeepResearchStream in services/gemini.ts
-      const stream = await performDeepResearchStream(exp.chatHistory.map(m => `${m.role}: ${m.content}`).join('\n'), hypothesis);
-      
-      try {
-        for await (const chunk of stream) {
-          if (!chunk) continue;
-          
-          // Access .text property directly for GenerateContentResponse as per SDK guidelines
-          const text = chunk.text;
-          if (text) {
-            fullText += text;
+        switch (event.type) {
+          case 'init':
+            onUpdate({ ...exp, cliSessionId: event.session_id || undefined, executionStatus: ResearchExecutionStatus.RUNNING });
+            setRightPanel('workspace');
+            break;
+
+          case 'tool_use': {
+            setToolActivities(prev => [...prev, {
+              id: event.tool_id || crypto.randomUUID(),
+              toolName: event.tool_name || 'unknown',
+              parameters: event.parameters,
+              status: 'running',
+              startedAt: Date.now(),
+            }]);
+            // Surface tool call as a chat message
+            const toolLabel = formatToolUseMessage(event.tool_name || 'unknown', event.parameters);
+            if (toolLabel) {
+              const toolMsg: Message = {
+                id: crypto.randomUUID(),
+                role: 'model',
+                content: toolLabel,
+                timestamp: Date.now(),
+                isToolMessage: true,
+              };
+              exp = { ...exp, chatHistory: [...exp.chatHistory, toolMsg], lastModifiedAt: Date.now() };
+              onUpdate(exp);
+            }
+            break;
           }
 
-          const grounding = chunk.candidates?.[0]?.groundingMetadata;
-          if (grounding?.groundingChunks) {
-            const newUrls = grounding.groundingChunks
-              .filter((c: any) => c.web?.uri)
-              .map((c: any) => c.web.uri);
-            browsing = Array.from(new Set([...browsing, ...newUrls]));
+          case 'tool_result': {
+            setToolActivities(prev => prev.map(a =>
+              a.id === event.tool_id
+                ? { ...a, status: (event.status === 'success' ? 'success' : 'error') as 'success' | 'error', output: event.output, completedAt: Date.now() }
+                : a
+            ));
+            // Surface tool result as a chat message
+            const resultLabel = formatToolResultMessage(event.tool_name || 'unknown', event.status || '', event.output);
+            if (resultLabel) {
+              const resultMsg: Message = {
+                id: crypto.randomUUID(),
+                role: 'model',
+                content: resultLabel,
+                timestamp: Date.now(),
+                isToolMessage: true,
+              };
+              exp = { ...exp, chatHistory: [...exp.chatHistory, resultMsg], lastModifiedAt: Date.now() };
+              onUpdate(exp);
+            }
+            break;
           }
 
-          onUpdate({
-            ...exp,
-            researchProgress: {
-              browsing,
-              thoughts: "Autonomous synthesis in progress..." // Thinking summaries are decided by the model internally
-            },
-            lastModifiedAt: Date.now()
-          });
-        }
-      } catch (streamErr: any) {
-        console.warn("Stream interrupted during consumption:", streamErr);
-        throw streamErr; 
-      }
+          case 'message':
+            if (event.role === 'assistant' && event.content) {
+              const msg: Message = {
+                id: crypto.randomUUID(),
+                role: 'model',
+                content: event.content,
+                timestamp: Date.now(),
+              };
+              exp = { ...exp, chatHistory: [...exp.chatHistory, msg], lastModifiedAt: Date.now() };
+              onUpdate(exp);
+            }
+            break;
 
-      onUpdate({
-        ...exp,
-        status: ExperimentStatus.COMPLETED,
-        researchProgress: undefined,
-        report: {
-          summary: "Frontier Synthesis Complete",
-          hypothesis,
-          fullContent: fullText || "Autonomous research protocol concluded. Final synthesis refined.",
-          citations: browsing
+          case 'done': {
+            const finalStatus = event.status === 'completed' ? ResearchExecutionStatus.COMPLETED : ResearchExecutionStatus.FAILED;
+            const findings = await getFindings(exp.id);
+            onUpdate({
+              ...exp,
+              executionStatus: finalStatus,
+              status: finalStatus === ResearchExecutionStatus.COMPLETED ? ExperimentStatus.COMPLETED : ExperimentStatus.FAILED,
+              findingsContent: findings || undefined,
+              lastModifiedAt: Date.now(),
+            });
+            if (findings) setRightPanel('findings');
+            break;
+          }
+
+          case 'error':
+            console.error('CLI error:', event.message || event);
+            break;
         }
+      }
+    } finally {
+      reader.releaseLock();
+      if (activeReaderRef.current === reader) {
+        activeReaderRef.current = null;
+      }
+    }
+  };
+
+  const executeResearch = async (exp: Experiment, hypothesis: string) => {
+    setToolActivities([]);
+
+    try {
+      const chatSummary = exp.chatHistory
+        .map(m => `${m.role === 'user' ? 'Human' : 'AI'}: ${m.content}`)
+        .join('\n\n');
+
+      onUpdate({ ...exp, executionStatus: ResearchExecutionStatus.RUNNING });
+
+      const stream = await startResearch({
+        experimentId: exp.id,
+        hypothesis,
+        experimentTitle: exp.title,
+        chatSummary,
       });
+
+      await consumeEventStream(stream, exp);
     } catch (err: any) {
-      console.error("Deep research failure:", err);
-      if (err.message?.includes("Requested entity was not found")) {
-        await handleEntityNotFound();
-        return;
+      console.error('Research execution failed:', err);
+      onUpdate({ ...exp, executionStatus: ResearchExecutionStatus.FAILED, status: ExperimentStatus.FAILED });
+    }
+  };
+
+  // === Follow-up chat during/after research ===
+  const handleResearchChat = async (message: string) => {
+    if (!message.trim()) return;
+    setIsLoading(true);
+
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: message,
+      timestamp: Date.now(),
+    };
+    const updatedExp = { ...experiment, chatHistory: [...experiment.chatHistory, msg] };
+    onUpdate(updatedExp);
+
+    try {
+      const stream = await sendResearchChat(experiment.id, message, experiment.cliSessionId);
+      await consumeEventStream(stream, updatedExp);
+    } catch (err: any) {
+      console.error('Research chat failed:', err);
+      const errMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'model',
+        content: `Communication error: ${err.message}`,
+        timestamp: Date.now(),
+      };
+      onUpdate({ ...updatedExp, chatHistory: [...updatedExp.chatHistory, errMsg] });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // === Script execution from file browser ===
+  const handleRunScript = async (scriptPath: string) => {
+    const ext = scriptPath.split('.').pop()?.toLowerCase();
+    const command = ext === 'sh' ? `sh ${scriptPath}` : `python ${scriptPath}`;
+
+    setTerminalOutput({ lines: [], exitCode: null });
+
+    try {
+      const stream = await executeScript(experiment.id, command);
+      const reader = stream.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        if (value.stream === 'exit') {
+          setTerminalOutput(prev => prev ? { ...prev, exitCode: (value as any).code } : null);
+        } else {
+          setTerminalOutput(prev => prev ? { ...prev, lines: [...prev.lines, value] } : null);
+        }
       }
-      onUpdate({ ...exp, status: ExperimentStatus.FAILED });
+    } catch (err: any) {
+      setTerminalOutput(prev => prev ? { ...prev, lines: [...prev.lines, { stream: 'stderr', line: err.message }], exitCode: -1 } : null);
     }
   };
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
-    
-    const msg: Message = { 
-      id: crypto.randomUUID(), 
-      role: 'user', 
-      content: input, 
-      timestamp: Date.now()
-    };
-    
-    onUpdate({ ...experiment, chatHistory: [...experiment.chatHistory, msg] });
+    if (!input.trim()) return;
+    // During research, allow interjections even if a stream is active
+    if (isLoading && !isResearchRunning) return;
+
+    // Route to appropriate handler based on experiment state
+    if (experiment.status === ExperimentStatus.RESEARCHING || experiment.status === ExperimentStatus.COMPLETED) {
+      handleResearchChat(input);
+    } else {
+      const msg: Message = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: input,
+        timestamp: Date.now()
+      };
+      onUpdate({ ...experiment, chatHistory: [...experiment.chatHistory, msg] });
+      processTurn(input);
+    }
     setInput('');
-    processTurn(input);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -354,6 +576,10 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
     }
   };
 
+  const showInput = experiment.status === ExperimentStatus.DEFINING ||
+                    experiment.status === ExperimentStatus.RESEARCHING ||
+                    experiment.status === ExperimentStatus.COMPLETED;
+
   return (
     <div className="flex h-[calc(100vh-3.5rem)] bg-white overflow-hidden">
       {/* Left Chat Column */}
@@ -361,79 +587,68 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 sm:px-12 py-10 scroll-smooth">
           <div className="max-w-3xl mx-auto space-y-16 pb-20">
             {experiment.chatHistory.map((msg) => (
-              <div key={msg.id} className="group animate-in fade-in slide-in-from-bottom-2 duration-700">
-                <div className="text-[8px] mono uppercase tracking-[0.4em] text-gray-300 mb-4 group-hover:text-black transition-colors flex items-center gap-2">
-                  <div className={`w-1.5 h-1.5 rounded-full ${msg.role === 'user' ? 'bg-gray-100' : 'bg-black/80 shadow-sm'}`}></div>
-                  {msg.role === 'user' ? 'Human' : 'Intelligence'}
+              msg.isToolMessage ? (
+                <div key={msg.id} className="animate-in fade-in duration-300 pl-4 border-l-2 border-gray-100 py-1">
+                  <div className="text-[12px] mono text-gray-400 flex items-center gap-2">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-gray-300">
+                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                    </svg>
+                    <MarkdownRenderer content={msg.content} />
+                  </div>
                 </div>
-                <div className="text-[16px] font-light leading-relaxed text-gray-800 whitespace-pre-wrap pl-4 border-l border-gray-50 group-hover:border-black/5 transition-all">
-                  <MarkdownRenderer content={msg.content} />
+              ) : (
+                <div key={msg.id} className="group animate-in fade-in slide-in-from-bottom-2 duration-700">
+                  <div className="text-[8px] mono uppercase tracking-[0.4em] text-gray-300 mb-4 group-hover:text-black transition-colors flex items-center gap-2">
+                    <div className={`w-1.5 h-1.5 rounded-full ${msg.role === 'user' ? 'bg-gray-100' : 'bg-black/80 shadow-sm'}`}></div>
+                    {msg.role === 'user' ? 'Human' : 'Intelligence'}
+                  </div>
+                  <div className="text-[16px] font-light leading-relaxed text-gray-800 whitespace-pre-wrap pl-4 border-l border-gray-50 group-hover:border-black/5 transition-all">
+                    <MarkdownRenderer content={msg.content} />
+                  </div>
+                  {msg.groundingUrls && <SourceAccordion sources={msg.groundingUrls} />}
                 </div>
-                {msg.groundingUrls && <SourceAccordion sources={msg.groundingUrls} />}
-              </div>
+              )
             ))}
 
-            {isLoading && !experiment.researchProgress && (
+            {isLoading && toolActivities.length === 0 && !isResearchRunning && (
               <ScientificLoader />
             )}
 
-            {experiment.researchProgress && (
-              <div className="p-8 glass rounded-[32px] border border-gray-100 shadow-[0_20px_60px_rgba(0,0,0,0.02)] animate-in zoom-in-98 duration-500 relative overflow-hidden group/card">
-                <div className="absolute top-0 left-0 w-full h-[1px] bg-gray-50 overflow-hidden">
-                  <div className="h-full bg-black/40 animate-progress-minimal w-1/3 rounded-full"></div>
-                </div>
-
-                <div className="flex items-start justify-between mb-8">
-                  <div className="space-y-1">
-                    <div className="text-[9px] uppercase tracking-[0.4em] font-black text-black">Autonomous Synthesis</div>
-                    <div className="text-[8px] text-gray-400 uppercase tracking-widest font-bold flex items-center gap-1.5">
-                      <span className="w-1 h-1 rounded-full bg-blue-400 animate-pulse"></span>
-                      Real-time Browsing
-                    </div>
+            {/* Tool activity feed during research */}
+            {(isResearchRunning || toolActivities.length > 0) && (
+              <div className="space-y-4">
+                <ToolActivityFeed activities={toolActivities} />
+                {isResearchRunning && (
+                  <div className="flex justify-center">
+                    <button
+                      onClick={cancelResearch}
+                      className="px-4 py-2 bg-black text-white text-[8px] uppercase tracking-widest font-black rounded-full hover:bg-red-600 transition-all active:scale-95 shadow-sm"
+                    >
+                      Abort Protocol
+                    </button>
                   </div>
-                  <button 
-                    onClick={cancelResearch}
-                    className="px-4 py-2 bg-black text-white text-[8px] uppercase tracking-widest font-black rounded-full hover:bg-red-600 transition-all active:scale-95 shadow-sm"
-                  >
-                    Abort Protocol
-                  </button>
-                </div>
+                )}
+              </div>
+            )}
 
-                <div className="space-y-8">
-                  {experiment.researchProgress.browsing.length > 0 && (
-                    <div className="space-y-3">
-                      <div className="text-[8px] uppercase tracking-widest text-gray-300 font-bold px-1">Network Sources</div>
-                      <div className="flex flex-wrap gap-2">
-                        {experiment.researchProgress.browsing.slice(-6).map((url, i) => (
-                          <div key={i} className="flex items-center gap-2 px-2.5 py-1 bg-white border border-gray-50 rounded-lg shadow-[0_1px_2px_rgba(0,0,0,0.01)] animate-in fade-in slide-in-from-right-1">
-                            <img src={`https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=32`} className="w-3 h-3 grayscale opacity-40" alt="" />
-                            <span className="text-[9px] text-gray-500 font-medium truncate max-w-[120px]">{new URL(url).hostname}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {experiment.researchProgress.thoughts && (
-                    <div className="space-y-3">
-                      <div className="text-[8px] uppercase tracking-widest text-gray-300 font-bold px-1">Thinking Process</div>
-                      <div className="max-h-24 overflow-y-auto text-[11px] text-gray-400 font-light italic leading-relaxed pl-3 border-l border-gray-100/50">
-                        {experiment.researchProgress.thoughts.split('\n').filter(l => l.trim()).slice(-3).map((line, i) => (
-                          <p key={i} className="mb-1 opacity-70 line-clamp-2">{line}</p>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  
-                  <div className="flex items-center justify-between pt-1">
-                    <span className="text-[8px] text-gray-300 font-black uppercase tracking-[0.2em] animate-pulse">Compiling frontier data</span>
-                    <span className="text-[8px] text-gray-200 mono">Live</span>
+            {/* Findings display after completion */}
+            {experiment.findingsContent && experiment.status === ExperimentStatus.COMPLETED && (
+              <div className="bg-white p-10 sm:p-16 rounded-[48px] border border-gray-100 shadow-[0_30px_100px_rgba(0,0,0,0.04)] animate-in slide-in-from-bottom-6 duration-1000">
+                <div className="text-[9px] uppercase tracking-[0.6em] font-black text-black mb-12 pb-6 border-b border-gray-50 flex items-center justify-between">
+                  Research Findings
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                    <span className="text-[8px] tracking-widest text-gray-400 uppercase">Complete</span>
                   </div>
+                </div>
+                <div className="prose prose-md max-w-none text-gray-700">
+                  <MarkdownRenderer content={experiment.findingsContent} experimentId={experiment.id} />
                 </div>
               </div>
             )}
 
-            {experiment.report && (
+            {/* Legacy report display (for old experiments) */}
+            {experiment.report && !experiment.findingsContent && (
               <div className="bg-white p-10 sm:p-16 rounded-[48px] border border-gray-100 shadow-[0_30px_100px_rgba(0,0,0,0.04)] animate-in slide-in-from-bottom-6 duration-1000">
                 <div className="text-[9px] uppercase tracking-[0.6em] font-black text-black mb-12 pb-6 border-b border-gray-50 flex items-center justify-between">
                   Synthesis Report
@@ -470,47 +685,103 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
         </div>
 
         {/* Input Dock */}
-        <div className="p-8 pb-12 glass border-t border-gray-50/50">
-          <div className="max-w-3xl mx-auto flex flex-col gap-6">
-            {experiment.status === ExperimentStatus.DEFINING ? (
+        {showInput && (
+          <div className="p-8 pb-12 glass border-t border-gray-50/50">
+            <div className="max-w-3xl mx-auto flex flex-col gap-6">
               <div className="flex flex-col">
                 <form onSubmit={handleSend} className="relative group">
                   <textarea
                     ref={textareaRef}
                     autoFocus
-                    disabled={isLoading}
+                    disabled={isLoading && !isResearchRunning}
                     rows={1}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Refine the research angle..."
+                    placeholder={
+                      experiment.status === ExperimentStatus.DEFINING
+                        ? "Refine the research angle..."
+                        : "Message the research agent..."
+                    }
                     className="w-full bg-transparent py-4 pr-12 text-lg font-light outline-none border-b border-gray-100 focus:border-black transition-all placeholder:text-gray-200 resize-none min-h-[56px] overflow-hidden"
                   />
-                  <button 
-                    type="submit" 
-                    disabled={isLoading || !input.trim()} 
+                  <button
+                    type="submit"
+                    disabled={(isLoading && !isResearchRunning) || !input.trim()}
                     className="absolute right-0 bottom-4 w-8 h-8 flex items-center justify-center rounded-full text-gray-200 hover:text-black hover:bg-gray-50 transition-all disabled:opacity-0 active:scale-90"
                   >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
                   </button>
                 </form>
+                {isResearchRunning && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="w-1 h-1 rounded-full bg-blue-400 animate-pulse"></span>
+                    <span className="text-[8px] text-gray-300 uppercase tracking-widest font-bold">Research agent active — you can send instructions</span>
+                  </div>
+                )}
               </div>
-            ) : experiment.status === ExperimentStatus.RESEARCHING ? (
-              <div className="text-center py-4 animate-in fade-in duration-1000">
-                <div className="flex items-center justify-center gap-3">
-                  <div className="w-1.5 h-1.5 bg-black rounded-full shadow-sm animate-pulse"></div>
-                  <span className="text-[9px] text-black uppercase tracking-[0.5em] font-black">Frontier Protocol Locked</span>
-                </div>
-              </div>
-            ) : null}
+            </div>
           </div>
+        )}
+      </div>
+
+      {/* Right Panel with Tab Switcher */}
+      <div className="w-[48%] bg-[#fcfcfc] overflow-hidden select-none border-l border-gray-50 relative flex flex-col">
+        {/* Tab Switcher */}
+        <div className="flex items-center gap-0 border-b border-gray-100 bg-white">
+          {(['graph', 'workspace', 'findings'] as RightPanel[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => { setRightPanel(tab); setSelectedFile(null); }}
+              className={`flex-1 py-3 text-[9px] uppercase tracking-[0.3em] font-bold transition-all border-b-2 ${
+                rightPanel === tab
+                  ? 'text-black border-black'
+                  : 'text-gray-300 border-transparent hover:text-gray-500'
+              }`}
+            >
+              {tab === 'graph' ? 'Knowledge Lattice' : tab === 'workspace' ? 'Workspace' : 'Findings'}
+            </button>
+          ))}
+        </div>
+
+        {/* Panel Content */}
+        <div className="flex-1 overflow-hidden">
+          {rightPanel === 'graph' && (
+            <KnowledgeGraph nodes={experiment.graphNodes} edges={experiment.graphEdges} />
+          )}
+          {rightPanel === 'workspace' && !selectedFile && (
+            <FileBrowser
+              experimentId={experiment.id}
+              isResearchRunning={isResearchRunning}
+              onFileSelect={setSelectedFile}
+              onRunScript={handleRunScript}
+            />
+          )}
+          {rightPanel === 'workspace' && selectedFile && (
+            <FileViewer
+              experimentId={experiment.id}
+              filePath={selectedFile}
+              onClose={() => setSelectedFile(null)}
+              onRun={() => handleRunScript(selectedFile)}
+            />
+          )}
+          {rightPanel === 'findings' && (
+            <FindingsView
+              experimentId={experiment.id}
+              isResearchRunning={isResearchRunning}
+            />
+          )}
         </div>
       </div>
 
-      {/* Right Graph Column */}
-      <div className="w-[48%] bg-[#fcfcfc] overflow-hidden select-none border-l border-gray-50 relative">
-        <KnowledgeGraph nodes={experiment.graphNodes} edges={experiment.graphEdges} />
-      </div>
+      {/* Terminal Output Modal */}
+      {terminalOutput && (
+        <TerminalOutput
+          lines={terminalOutput.lines}
+          exitCode={terminalOutput.exitCode}
+          onClose={() => setTerminalOutput(null)}
+        />
+      )}
 
       <style>{`
         @keyframes progress-minimal {
