@@ -150,8 +150,9 @@ researchRouter.get('/:id/events', (req: Request, res: Response) => {
 // POST /api/research/:id/chat — send follow-up message (or resume after restart)
 researchRouter.post('/:id/chat', async (req: Request, res: Response) => {
   const { message, cliSessionId: clientSessionId } = req.body;
-  const experimentId = req.params.id;
-  let session = getSession(experimentId);
+  const experimentId = req.params.id as string;
+// Or directly in the function call:
+  const session = getSession(req.params.id as string);
 
   // Try to find a session ID to resume
   const resumeId = session?.cliSessionId || clientSessionId || undefined;

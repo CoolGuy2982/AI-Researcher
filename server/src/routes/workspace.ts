@@ -8,7 +8,7 @@ export const workspaceRouter = Router();
 // GET /api/workspace/:id/tree — file tree
 workspaceRouter.get('/:id/tree', async (req: Request, res: Response) => {
   try {
-    const tree = await listWorkspaceFiles(req.params.id);
+const tree = await listWorkspaceFiles(req.params.id as string);
     res.json({ tree });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -17,7 +17,7 @@ workspaceRouter.get('/:id/tree', async (req: Request, res: Response) => {
 
 // GET /api/workspace/:id/file?path=<relative> — read file or serve image
 workspaceRouter.get('/:id/file', async (req: Request, res: Response) => {
-  const relativePath = req.query.path as string;
+const relativePath = req.query.path as string;
   if (!relativePath) {
     res.status(400).json({ error: 'path query parameter required' });
     return;

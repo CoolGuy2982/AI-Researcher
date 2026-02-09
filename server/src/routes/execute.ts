@@ -24,7 +24,9 @@ executeRouter.post('/:id/execute', (req: Request, res: Response) => {
     return;
   }
 
-  const wsPath = getWorkspacePath(req.params.id);
+// Around line 27
+const wsPath = getWorkspacePath(req.params.id as string);
+
 
   // Validate that any file arguments don't escape the workspace
   for (const arg of cmdParts.slice(1)) {
