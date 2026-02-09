@@ -29,3 +29,18 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`[frontier-server] listening on :${PORT}`);
 });
+
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Serve static files from the Vite build directory
+// This assumes your Vite build output is in the root 'dist' folder
+app.use(express.static(path.join(__dirname, '../../dist')));
+
+// Handle SPA routing by returning index.html for all other requests
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../../dist/index.html'));
+});
