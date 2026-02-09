@@ -41,6 +41,7 @@ const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, '../../dist')));
 
 // Handle SPA routing by returning index.html for all other requests
-app.get('/*', (req, res) => {
+// Fix for Express 5 catch-all routing
+app.get('/:splat*', (req, res) => {
   res.sendFile(path.join(__dirname, '../../dist/index.html'));
 });
