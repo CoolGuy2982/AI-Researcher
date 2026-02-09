@@ -15,9 +15,65 @@ function setupSse(res: Response) {
   res.flushHeaders();
 }
 
-function sendSseEvent(res: Response, data: any) {
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
-}
+/**
+ * Proxy for Gemini Deep Research (Interactions API)
+ * This bypasses CORS by making the request from the server.
+ */
+researchRouter.post('/deep-research', async (req: Request, res: Response) => {
+  const { input, agent, agent_config } = req.body;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+
+  if (!apiKey) {
+    res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+    return;
+  }
+
+  try {
+    const googleUrl = 'https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse';
+    
+    const response = await fetch(googleUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      body: JSON.stringify({
+        input,
+        agent,
+        background: true,
+        stream: true,
+        agent_config
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      res.status(response.status).send(errText);
+      return;
+    }
+
+    // Setup SSE headers for the client
+    setupSse(res);
+
+    // Pipe the stream from Google directly to our response
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No readable stream from Google API');
+
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+    res.end();
+
+  } catch (error: any) {
+    console.error('Deep Research Proxy Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Existing Research Routes ---
 
 researchRouter.post('/start', async (req: Request, res: Response) => {
   const { experimentId, hypothesis, experimentTitle, chatSummary, model } = req.body;
@@ -119,13 +175,13 @@ researchRouter.get('/:id/events', (req: Request, res: Response) => {
   setupSse(res);
 
   for (const event of session.events) {
-    sendSseEvent(res, event);
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
   if (session.status === 'running') {
     addSseClient(req.params.id as string, res);
   } else {
-    sendSseEvent(res, { type: 'done', status: session.status });
+    res.write(`data: ${JSON.stringify({ type: 'done', status: session.status })}\n\n`);
     res.end();
   }
 });

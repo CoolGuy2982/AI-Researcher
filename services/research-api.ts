@@ -11,7 +11,7 @@ export interface StartResearchParams {
 /**
  * Parse SSE stream from fetch response body into typed events.
  */
-function parseSseStream<T = CliStreamEvent>(body: ReadableStream<Uint8Array>): ReadableStream<T> {
+function parseSseStream<T = any>(body: ReadableStream<Uint8Array>): ReadableStream<T> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -44,7 +44,33 @@ function parseSseStream<T = CliStreamEvent>(body: ReadableStream<Uint8Array>): R
 }
 
 /**
- * Start research execution. Returns a readable stream of CLI events.
+ * Initiates Phase 1: Deep Research Synthesis via backend proxy.
+ */
+export async function performDeepResearchStream(context: string, hypothesis: string): Promise<ReadableStream<any>> {
+  const response = await fetch('/api/research/deep-research', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      input: `Perform an exhaustive research synthesis for the following hypothesis: "${hypothesis}". Context: ${context}`,
+      agent: 'deep-research-pro-preview-12-2025',
+      agent_config: {
+        type: 'deep-research',
+        thinking_summaries: 'auto'
+      }
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Deep Research failed (${response.status}): ${text}`);
+  }
+  if (!response.body) throw new Error('No response body');
+
+  return parseSseStream(response.body);
+}
+
+/**
+ * Start Phase 2: Coding & Execution.
  */
 export async function startResearch(params: StartResearchParams): Promise<ReadableStream<CliStreamEvent>> {
   const response = await fetch('/api/research/start', {
@@ -64,7 +90,6 @@ export async function startResearch(params: StartResearchParams): Promise<Readab
 
 /**
  * Send a follow-up chat message to a research session.
- * Pass cliSessionId to resume after a server restart.
  */
 export async function sendResearchChat(experimentId: string, message: string, cliSessionId?: string): Promise<ReadableStream<CliStreamEvent>> {
   const response = await fetch(`/api/research/${experimentId}/chat`, {
@@ -104,22 +129,18 @@ export async function getWorkspaceTree(experimentId: string): Promise<FileTreeNo
  */
 export async function readWorkspaceFile(experimentId: string, filePath: string): Promise<{ content: string; mimeType: string }> {
   const res = await fetch(`/api/workspace/${experimentId}/file?path=${encodeURIComponent(filePath)}`);
-
   if (!res.ok) throw new Error(`File read failed: ${res.status}`);
-
   const mimeType = res.headers.get('content-type') || 'text/plain';
-
   if (mimeType.startsWith('image/')) {
     const blob = await res.blob();
     return { content: URL.createObjectURL(blob), mimeType };
   }
-
   const data = await res.json();
   return { content: data.content, mimeType: data.mimeType };
 }
 
 /**
- * Read findings.md from workspace. Returns null if not found.
+ * Read findings.md from workspace.
  */
 export async function getFindings(experimentId: string): Promise<string | null> {
   const res = await fetch(`/api/workspace/${experimentId}/findings`);
@@ -130,7 +151,7 @@ export async function getFindings(experimentId: string): Promise<string | null> 
 }
 
 /**
- * Execute a script and return SSE stream of stdout/stderr.
+ * Execute a script and return SSE stream.
  */
 export async function executeScript(experimentId: string, command: string): Promise<ReadableStream<{ stream: string; line: string; code?: number }>> {
   const response = await fetch(`/api/workspace/${experimentId}/execute`, {
