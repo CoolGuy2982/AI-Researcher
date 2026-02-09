@@ -77,18 +77,26 @@ researchRouter.post('/deep-research', async (req: Request, res: Response) => {
 
 researchRouter.post('/start', async (req: Request, res: Response) => {
   const { experimentId, hypothesis, experimentTitle, chatSummary, model } = req.body;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
 
   if (!experimentId || !hypothesis) {
     res.status(400).json({ error: 'experimentId and hypothesis are required' });
     return;
   }
 
+  if (!apiKey) {
+    res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+    return;
+  }
+
+  // Clean up existing sessions
   const existing = getSession(experimentId as string);
   if (existing?.status === 'running') {
     existing.runner?.abort();
     deleteSession(experimentId as string);
   }
 
+  // Scaffold workspace first
   await scaffoldWorkspace(experimentId as string, {
     experimentTitle: experimentTitle || 'Untitled',
     hypothesis,
@@ -97,10 +105,86 @@ researchRouter.post('/start', async (req: Request, res: Response) => {
 
   const wsPath = getWorkspacePath(experimentId as string);
 
-  const prompt = `You are beginning a research experiment.
+  // 1. Setup SSE for the client immediately
+  setupSse(res);
+  const session = createSession(experimentId as string, null as any); 
+  addSseClient(experimentId as string, res);
+
+  broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '✨ Initiating Deep Research agent...' });
+
+  let deepResearchReport = '';
+
+  try {
+    // 2. Call Google Deep Research (Interactions API)
+    const googleUrl = 'https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse';
+    const drResponse = await fetch(googleUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      body: JSON.stringify({
+        input: `Conduct deep research to support the following hypothesis for a physics/AI experiment: "${hypothesis}". Context: ${chatSummary}`,
+        agent: 'deep-research-pro-preview-12-2025',
+        background: true,
+        stream: true,
+        agent_config: {
+          type: 'deep-research',
+          thinking_summaries: 'auto'
+        }
+      })
+    });
+
+    if (!drResponse.ok) {
+      throw new Error(`Deep Research API failed: ${drResponse.statusText}`);
+    }
+
+    // 3. Process the Deep Research Stream
+    const reader = drResponse.body?.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.replace('data: ', ''));
+            
+            // Handle streaming reasoning/thoughts
+            if (data.event_type === 'content.delta') {
+              if (data.delta.type === 'thought_summary') {
+                broadcastEvent(experimentId, { 
+                  type: 'message', 
+                  role: 'assistant', 
+                  content: `[Thinking] ${data.delta.content.text}` 
+                });
+              } else if (data.delta.type === 'text') {
+                deepResearchReport += data.delta.text;
+              }
+            }
+          } catch (e) { /* Ignore partial JSON */ }
+        }
+      }
+    }
+
+    broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '✅ Deep Research complete. Transitioning to experiment execution...' });
+
+    // 4. Start the Coding Agent (spawnGeminiCli) with the gathered report
+    const prompt = `You are beginning a research experiment.
 
 ## Background Context (from refinement discussion)
 ${chatSummary || 'No additional context provided.'}
+
+## Deep Research Insights
+${deepResearchReport || 'No deep research report was generated.'}
 
 ## Hypothesis
 ${hypothesis}
@@ -115,50 +199,53 @@ Execute the full research workflow as described in GEMINI.md.
 4. Analyze results and generate figures in figures/
 5. Write findings to findings.md`;
 
-  const runner = spawnGeminiCli({
-    prompt,
-    cwd: wsPath,
-    model: model || 'gemini-3-pro-preview',
-    yolo: true,
-  });
+    const runner = spawnGeminiCli({
+      prompt,
+      cwd: wsPath,
+      model: model || 'gemini-3-pro-preview',
+      yolo: true,
+    });
 
-  const session = createSession(experimentId as string, runner);
+    session.runner = runner;
+    session.status = 'running';
 
-  setupSse(res);
-  addSseClient(experimentId as string, res);
+    runner.on('event', (event) => {
+      if (event.type === 'init' && event.session_id) {
+        session.cliSessionId = event.session_id;
+      }
+      broadcastEvent(experimentId as string, event);
+    });
 
-  runner.on('event', (event) => {
-    if (event.type === 'init' && event.session_id) {
-      session.cliSessionId = event.session_id;
-    }
-    broadcastEvent(experimentId as string, event);
-  });
+    runner.on('log', (line) => {
+      broadcastEvent(experimentId as string, { type: 'message', role: 'assistant', content: line });
+    });
 
-  runner.on('log', (line) => {
-    broadcastEvent(experimentId as string, { type: 'message', role: 'assistant', content: line });
-  });
+    runner.on('stderr', (text) => {
+      broadcastEvent(experimentId as string, { type: 'error', message: text });
+    });
 
-  runner.on('stderr', (text) => {
-    broadcastEvent(experimentId as string, { type: 'error', message: text });
-  });
+    runner.on('close', ({ code }: { code: number | null }) => {
+      session.status = code === 0 ? 'completed' : 'failed';
+      session.runner = null;
+      broadcastEvent(experimentId as string, { type: 'done', exitCode: code, status: session.status } as any);
 
-  runner.on('close', ({ code }: { code: number | null }) => {
-    session.status = code === 0 ? 'completed' : 'failed';
-    session.runner = null;
-    const doneEvent = { type: 'done', exitCode: code, status: session.status };
-    broadcastEvent(experimentId as string, doneEvent as any);
+      for (const client of session.sseClients) {
+        client.end();
+      }
+      session.sseClients.clear();
+    });
 
-    for (const client of session.sseClients) {
-      client.end();
-    }
-    session.sseClients.clear();
-  });
+    runner.on('spawn-error', (err: Error) => {
+      session.status = 'failed';
+      broadcastEvent(experimentId as string, { type: 'error', message: err.message });
+      res.end();
+    });
 
-  runner.on('spawn-error', (err: Error) => {
-    session.status = 'failed';
-    broadcastEvent(experimentId as string, { type: 'error', message: err.message });
+  } catch (err: any) {
+    console.error('Research Workflow Error:', err);
+    broadcastEvent(experimentId, { type: 'error', message: `Workflow failed: ${err.message}` });
     res.end();
-  });
+  }
 
   req.on('close', () => {
     session.sseClients.delete(res);
