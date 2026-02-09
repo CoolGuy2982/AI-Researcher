@@ -50,7 +50,7 @@ gemini -p "Run the experiment" --output-format stream-json
 gemini -p "Write and execute the analysis script" --yolo
 
 # Specify model
-gemini -p "query" -m gemini-2.5-pro
+gemini -p "query" -m gemini-3-pro-preview
 ```
 
 **JSON output format:**
@@ -58,7 +58,7 @@ gemini -p "query" -m gemini-2.5-pro
 {
   "response": "The experiment completed successfully...",
   "stats": {
-    "models": { "gemini-2.5-pro": { "requests": 4, "inputTokens": 12000, "outputTokens": 3200 } },
+    "models": { "gemini-3-pro-preview": { "requests": 4, "inputTokens": 12000, "outputTokens": 3200 } },
     "tools": { "run_shell_command": { "calls": 3, "successes": 3 } },
     "files": { "linesAdded": 145, "linesRemoved": 12 }
   }
@@ -151,7 +151,7 @@ You are an autonomous research scientist. Your workflow is:
 ```json
 {
   "model": {
-    "name": "gemini-2.5-pro",
+    "name": "gemini-3-pro-preview",
     "maxTurns": 50
   },
   "tools": {
@@ -314,7 +314,7 @@ app.post('/api/research', (req, res) => {
 
   const runner = runGeminiCli({
     prompt,
-    model: 'gemini-2.5-pro',
+    model: 'gemini-3-pro',
     sandbox: true,
     yolo: true,
     cwd: `./workspace/${experimentId}`

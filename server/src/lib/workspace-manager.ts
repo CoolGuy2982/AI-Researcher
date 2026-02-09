@@ -44,7 +44,7 @@ export async function scaffoldWorkspace(experimentId: string, context: Workspace
   const geminiDir = path.join(wsPath, '.gemini');
   await fs.mkdir(geminiDir, { recursive: true });
   await fs.writeFile(path.join(geminiDir, 'settings.json'), JSON.stringify({
-    model: { name: 'gemini-2.5-pro', maxTurns: 50 },
+    model: { name: 'gemini-3.0-pro', maxTurns: 50 },
     tools: {
       allowed: [
         'read_file', 'write_file', 'edit_file',

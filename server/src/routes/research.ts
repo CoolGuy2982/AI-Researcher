@@ -118,7 +118,7 @@ Execute the full research workflow as described in GEMINI.md.
   const runner = spawnGeminiCli({
     prompt,
     cwd: wsPath,
-    model: model || 'gemini-2.5-pro',
+    model: model || 'gemini-3-pro-preview',
     yolo: true,
   });
 
