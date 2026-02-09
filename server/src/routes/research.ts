@@ -79,17 +79,20 @@ researchRouter.post('/start', async (req: Request, res: Response) => {
   const { experimentId, hypothesis, experimentTitle, chatSummary, model } = req.body;
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
 
+  console.log(`[Research] Starting workflow for experiment: ${experimentId}`);
+
   if (!experimentId || !hypothesis) {
     res.status(400).json({ error: 'experimentId and hypothesis are required' });
     return;
   }
 
   if (!apiKey) {
+    console.error('[Research] Error: GEMINI_API_KEY is missing');
     res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
     return;
   }
 
-  // 1. Initialize Session & Workspace
+  // Cleanup existing
   const existing = getSession(experimentId as string);
   if (existing?.status === 'running') {
     existing.runner?.abort();
@@ -107,104 +110,107 @@ researchRouter.post('/start', async (req: Request, res: Response) => {
   const session = createSession(experimentId as string, null as any);
   addSseClient(experimentId as string, res);
 
-  broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '🔍 Initializing Deep Research Agent...' });
+  broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '🔍 Contacting Gemini Deep Research Agent...' });
 
   let deepResearchReport = '';
   let interactionId = '';
   let isComplete = false;
 
   try {
-    // 2. Start Deep Research Interaction via Google API
+    // 1. Initial Request to Start Research
+    console.log('[Research] Sending POST to Interactions API...');
     const googleUrl = 'https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse';
     
-    const startResearch = async () => {
-      const response = await fetch(googleUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-        body: JSON.stringify({
-          input: `Perform deep research for this hypothesis: "${hypothesis}". Context: ${chatSummary}`,
-          agent: 'deep-research-pro-preview-12-2025',
-          background: true,
-          stream: true,
-          agent_config: { type: 'deep-research', thinking_summaries: 'auto' }
-        })
-      });
+    const response = await fetch(googleUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        input: `Conduct exhaustive research for this hypothesis: "${hypothesis}". Context: ${chatSummary}`,
+        agent: 'deep-research-pro-preview-12-2025',
+        background: true,
+        stream: true,
+        agent_config: { type: 'deep-research', thinking_summaries: 'auto' }
+      })
+    });
 
-      if (!response.ok) throw new Error(`Google API error: ${response.statusText}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Google API Init Failed: ${response.status} - ${errorText}`);
+    }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const cleanLine = line.trim();
-            if (!cleanLine.startsWith('data: ')) continue;
-            const dataStr = cleanLine.replace('data: ', '');
-            if (dataStr === '[DONE]') break;
-
-            try {
-              const data = JSON.parse(dataStr);
-              if (data.event_type === 'interaction.start') {
-                interactionId = data.interaction.id;
-              }
-              if (data.event_type === 'content.delta') {
-                if (data.delta.type === 'thought_summary') {
-                  // Send research "thoughts" to the UI so the user knows it's working
-                  broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: `[Thinking] ${data.delta.content.text}` });
-                } else if (data.delta.type === 'text') {
-                  deepResearchReport += data.delta.text;
-                }
-              }
-              if (data.event_type === 'interaction.complete') {
-                isComplete = true;
-              }
-            } catch (e) { /* ignore chunking errors */ }
-          }
+    // 2. Process Initial Stream to get Interaction ID
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const dataStr = line.replace('data: ', '').trim();
+          if (!dataStr || dataStr === '[DONE]') continue;
+          
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.event_type === 'interaction.start') {
+              interactionId = data.interaction.id;
+              console.log(`[Research] Interaction ID received: ${interactionId}`);
+            }
+            if (data.event_type === 'content.delta' && data.delta.type === 'thought_summary') {
+              broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: `[Thinking] ${data.delta.content.text}` });
+            }
+            if (data.event_type === 'interaction.complete') {
+              isComplete = true;
+            }
+          } catch (e) { /* ignore chunking noise */ }
         }
       }
-    };
+    }
 
-    await startResearch();
-
-    // 3. Polling Fallback (Crucial: Wait if the stream ends before completion)
-    while (!isComplete && interactionId) {
+    // 3. Polling Loop: Wait for the actual report if not finished
+    console.log('[Research] Entering polling loop for status...');
+    let attempts = 0;
+    while (!isComplete && interactionId && attempts < 60) { // Max 10 mins
+      attempts++;
       const pollRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions/${interactionId}`, {
         headers: { 'x-goog-api-key': apiKey }
       });
       const statusData = await pollRes.json();
+      
+      console.log(`[Research] Poll ${attempts}: Status = ${statusData.status}`);
 
       if (statusData.status === 'completed') {
-        // Grab the final output text
-        deepResearchReport = statusData.outputs?.[statusData.outputs.length - 1]?.text || deepResearchReport;
+        deepResearchReport = statusData.outputs?.[statusData.outputs.length - 1]?.text || '';
         isComplete = true;
+        break;
       } else if (statusData.status === 'failed') {
-        throw new Error(`Research failed: ${statusData.error?.message || 'Unknown error'}`);
-      } else {
-        // Still in progress, wait 10 seconds before polling again
-        await new Promise(r => setTimeout(r, 10000));
+        throw new Error(`Deep Research failed: ${JSON.stringify(statusData.error)}`);
       }
+      
+      // Wait 10 seconds before polling again
+      await new Promise(resolve => setTimeout(resolve, 10000));
     }
 
-    broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '✅ Research complete. Passing synthesis to Coding Agent...' });
+    if (!deepResearchReport) {
+      console.warn('[Research] Warning: Research finished but report is empty.');
+    }
 
-    // 4. Trigger the Research Coding Agent (CLI)
-    const prompt = `You are an AI research scientist.
+    broadcastEvent(experimentId, { type: 'message', role: 'assistant', content: '✅ Research synthesized. Starting Coding Agent...' });
 
-## RESEARCH REPORT
-${deepResearchReport || 'No report generated. Use general knowledge.'}
+    // 4. Start the CLI Coding Agent
+    const prompt = `You are an expert AI Research Scientist.
+    
+## DEEP RESEARCH REPORT
+${deepResearchReport || 'No specific internet research available. Use internal knowledge.'}
 
-## HYPOTHESIS
-${hypothesis}
+## EXPERIMENT GOAL
+Hypothesis: ${hypothesis}
+Context: ${chatSummary}
 
-Follow the instructions in GEMINI.md to implement the experiment code, run tests, and generate findings.`;
+Proceed with coding the experiment per GEMINI.md instructions.`;
 
     const runner = spawnGeminiCli({
       prompt,
@@ -229,8 +235,8 @@ Follow the instructions in GEMINI.md to implement the experiment code, run tests
     });
 
   } catch (err: any) {
-    console.error('Workflow Error:', err);
-    broadcastEvent(experimentId, { type: 'error', message: `Workflow Error: ${err.message}` });
+    console.error('[Research] Fatal Workflow Error:', err);
+    broadcastEvent(experimentId, { type: 'error', message: `Workflow failed: ${err.message}` });
   }
 });
 
