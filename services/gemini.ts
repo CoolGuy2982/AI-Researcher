@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Type, FunctionDeclaration, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 
 const getClient = () => {
   // Check for runtime injected key (Cloud Run) or build-time key (Local)
@@ -7,8 +6,6 @@ const getClient = () => {
   
   if (!apiKey) {
     console.error("CRITICAL: GEMINI_API_KEY is missing. Please set it in Cloud Run.");
-    // We don't throw immediately to allow the UI to potentially handle it, 
-    // but the SDK will likely fail if we pass undefined.
   }
   
   return new GoogleGenAI({ apiKey });
@@ -28,7 +25,6 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
       const status = err.status || (err as any).code;
       const message = err.message || "";
       
-      // Retry on 429 (Rate Limit) or 500 (Internal Server Error)
       if (status === 429 || status === 500 || message.includes("429") || message.includes("500")) {
         const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
         console.warn(`API error (${status}). Retrying in ${Math.round(delay)}ms... (Attempt ${i + 1}/${maxRetries})`);
@@ -45,7 +41,7 @@ export const updateGraphDeclaration: FunctionDeclaration = {
   name: 'update_knowledge_graph',
   parameters: {
     type: Type.OBJECT,
-    description: 'Updates the visual knowledge lattice with nodes (concepts, papers, formulas) and their relationships. REQUIRED: Always include valid URLs for "paper" nodes and high-quality references for "concept" nodes when available.',
+    description: 'Updates the visual knowledge lattice with nodes (concepts, papers, formulas) and their relationships.',
     properties: {
       nodes: {
         type: Type.ARRAY,
@@ -55,8 +51,8 @@ export const updateGraphDeclaration: FunctionDeclaration = {
             id: { type: Type.STRING, description: 'Unique slug or short ID.' },
             label: { type: Type.STRING, description: 'Display name.' },
             type: { type: Type.STRING, enum: ['concept', 'paper', 'formula', 'frontier'] },
-            url: { type: Type.STRING, description: 'Source URL from scientific repositories (arXiv, Nature, PubMed, etc.)' },
-            description: { type: Type.STRING, description: 'Brief context or summary of the node.' }
+            url: { type: Type.STRING, description: 'Source URL' },
+            description: { type: Type.STRING, description: 'Context.' }
           },
           required: ['id', 'label', 'type']
         }
@@ -81,10 +77,10 @@ export const initiateResearchDeclaration: FunctionDeclaration = {
   name: 'initiate_deep_research',
   parameters: {
     type: Type.OBJECT,
-    description: 'Trigger this ONLY when the refinement process has yielded a specific, novel, and mathematically grounded hypothesis at the knowledge frontier.',
+    description: 'Trigger this ONLY when the refinement process has yielded a specific, novel hypothesis.',
     properties: {
       final_hypothesis: { type: Type.STRING, description: 'The formal scientific hypothesis.' },
-      justification: { type: Type.STRING, description: 'Why this research vector is essential and novel.' }
+      justification: { type: Type.STRING, description: 'Why this vector is novel.' }
     },
     required: ['final_hypothesis', 'justification']
   }
@@ -95,22 +91,12 @@ export const createRefinementChat = () => {
   const chat = ai.chats.create({
     model: 'gemini-3-pro-preview',
     config: {
-      systemInstruction: `You are an elite AI Research Scientist. Your goal is to probe the user's initial hunches and refine them into a specific, novel, frontier research vector.
-
-RULES:
-1. INTELLECTUAL DEPTH: Do not be generic. If they mention biology, ask about enzymatic fold stability or active site geometry ($\Delta G^{\ddagger}$). If they mention LLMs, ask about context compression entropy or attention sparsity.
-2. GRAPH: Use 'update_knowledge_graph' frequently. You MUST prioritize adding "paper" nodes with URLs from actual scientific repositories. Every time you identify a key citation, add it to the graph.
-3. PROBING: Actively pull the user's "unique insight" or "inkling" out of them. Ask for the "frontier hunch".
-4. AUTONOMY: When a novel hypothesis is clear, call 'initiate_deep_research'.
-
-FORMATTING:
-- Use KaTeX ($...$ or $$...$$).
-- After every tool call, always provide a verbal explanation to the user.`,
+      systemInstruction: `You are an elite AI Research Scientist. Refine hunches into novel frontier research vectors.
+      Use 'update_knowledge_graph' frequently. Call 'initiate_deep_research' when a hypothesis is clear.`,
       tools: [{ functionDeclarations: [updateGraphDeclaration, initiateResearchDeclaration] }]
     }
   });
 
-  // Wrap sendMessage with retry logic
   const originalSendMessage = chat.sendMessage.bind(chat);
   chat.sendMessage = (args: any) => withRetry(() => originalSendMessage(args));
 
@@ -118,26 +104,27 @@ FORMATTING:
 };
 
 /**
- * Performs deep research synthesis using Google Search grounding.
- * Refactored to align with @google/genai guidelines for model selection and tool usage.
+ * Performs deep research synthesis using the Gemini Deep Research Agent (Interactions API).
  */
-export async function performDeepResearchStream(context: string, hypothesis: string): Promise<AsyncIterable<GenerateContentResponse>> {
+export async function performDeepResearchStream(context: string, hypothesis: string): Promise<AsyncIterable<any>> {
   const ai = getClient();
-  const prompt = `Perform an exhaustive research synthesis for the following hypothesis: "${hypothesis}". Context: ${context}. 
+  const prompt = `Perform an exhaustive research synthesis for the following hypothesis: "${hypothesis}". 
+  Context from previous discussion: ${context}. 
     
-    You must:
-    1. Search broadly across scientific literature using Google Search.
-    2. Identify core papers and list their URLs explicitly.
-    3. Construct a high-precision theoretical framework.
-    4. Produce a detailed final report with Abstract, Methodology, and Citations.`;
+  You must:
+  1. Search broadly across scientific literature.
+  2. Produce a detailed final report with Abstract, Methodology, and Citations.`;
 
-  return await withRetry<AsyncIterable<GenerateContentResponse>>(() => 
-    ai.models.generateContentStream({
-      model: 'gemini-3-pro-preview',
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
+  return await withRetry<AsyncIterable<any>>(() => 
+    (ai as any).interactions.create({
+      agent: 'deep-research-pro-preview-12-2025',
+      input: prompt,
+      background: true,
+      stream: true,
+      agent_config: {
+        type: 'deep-research',
+        thinking_summaries: 'auto'
+      }
     })
   );
 }
