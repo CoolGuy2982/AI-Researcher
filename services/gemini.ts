@@ -1,10 +1,13 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 
 const getClient = () => {
-  const apiKey = (window as any).ENV?.GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
+  // Use runtime environment variables injected via /env.js
+  const apiKey = (window as any).ENV?.GEMINI_API_KEY;
+  
   if (!apiKey) {
-    console.error("CRITICAL: GEMINI_API_KEY is missing.");
+    console.error("CRITICAL: GEMINI_API_KEY is missing in window.ENV.");
   }
+  
   return new GoogleGenAI({ apiKey });
 };
 

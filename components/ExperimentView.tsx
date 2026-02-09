@@ -55,17 +55,41 @@ const SourceAccordion: React.FC<{ sources: { title: string; uri: string }[] }> =
 };
 
 const ScientificLoader: React.FC = () => (
-  <div className="flex flex-col items-center justify-center py-24 animate-in fade-in duration-1000">
-    <div className="relative w-16 h-16 flex items-center justify-center">
-      <div className="absolute inset-[-100%] bg-radial-gradient from-gray-50/50 to-transparent blur-[80px] opacity-30 animate-pulse"></div>
-      <div className="absolute inset-0 border-[0.5px] border-gray-100 rounded-full animate-spin-extremely-slow">
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[1px] h-[1px] bg-black/20 rounded-full"></div>
+  <div className="flex flex-col items-center justify-center py-32 animate-in fade-in zoom-in-95 duration-1000">
+    <div className="relative w-24 h-24 flex items-center justify-center">
+      {/* Soft Lavender Glow */}
+      <div className="absolute inset-[-50%] bg-gradient-to-tr from-lavender-100/20 via-violet-50/10 to-transparent blur-[60px] animate-pulse-slow"></div>
+      
+      {/* Outer Orbit */}
+      <div className="absolute inset-0 border-[0.5px] border-violet-100/50 rounded-full animate-spin-slow">
+        <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white rounded-full shadow-sm border border-violet-50"></div>
       </div>
-      <div className="relative w-1 h-1 bg-black rounded-full shadow-[0_0_15px_rgba(0,0,0,0.1)]">
-        <div className="absolute inset-[-400%] bg-black/5 rounded-full blur-[15px] animate-breathing-core"></div>
+      
+      {/* Middle Orbit - Counter Rotating */}
+      <div className="absolute inset-4 border-[0.5px] border-violet-200/30 rounded-full animate-spin-reverse-medium">
+        <div className="absolute -bottom-0.5 right-1/2 translate-x-1/2 w-1.5 h-1.5 bg-violet-100/80 rounded-full blur-[1px]"></div>
       </div>
+      
+      {/* Inner Core - Glassmorphic */}
+      <div className="relative w-8 h-8 rounded-2xl bg-white/40 backdrop-blur-md border border-white/80 shadow-[0_8px_32px_rgba(0,0,0,0.03)] flex items-center justify-center animate-float">
+        <div className="w-1.5 h-1.5 bg-gradient-to-tr from-violet-400 to-fuchsia-300 rounded-full animate-ping-slow"></div>
+        <div className="absolute inset-0 bg-gradient-to-tr from-violet-500/10 to-transparent rounded-2xl"></div>
+      </div>
+
+      {/* Dynamic Particles */}
+      {[...Array(3)].map((_, i) => (
+        <div 
+          key={i}
+          className={`absolute w-1 h-1 bg-violet-200/40 rounded-full animate-orbit-${i+1}`}
+        ></div>
+      ))}
     </div>
-    <div className="mt-8 text-[9px] mono text-gray-300 uppercase tracking-[0.8em] font-medium animate-pulse select-none">Refining</div>
+    <div className="mt-12 flex flex-col items-center gap-3">
+      <div className="text-[10px] mono text-violet-300 uppercase tracking-[1em] font-medium animate-pulse select-none ml-[1em]">
+        Synthesizing
+      </div>
+      <div className="h-[1px] w-12 bg-gradient-to-r from-transparent via-violet-100 to-transparent"></div>
+    </div>
   </div>
 );
 
@@ -128,15 +152,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [experiment.chatHistory, isLoading, toolActivities, experiment.researchProgress]);
-
-  const handleEntityNotFound = async () => {
-    const aistudio = (window as any).aistudio;
-    if (aistudio?.openSelectKey) {
-      await aistudio.openSelectKey();
-      onUpdate({ ...experiment, status: ExperimentStatus.DEFINING, researchProgress: undefined });
-      setIsLoading(false);
-    }
-  };
 
   const cancelResearch = async () => {
     try { await abortResearch(experiment.id); } catch { }
@@ -227,7 +242,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       }
       
     } catch (err: any) {
-      if (err.message?.includes("Requested entity was not found")) { await handleEntityNotFound(); return; }
       onUpdate({ ...experiment, chatHistory: [...experiment.chatHistory, { id: crypto.randomUUID(), role: 'model', content: `Synthesis interrupted: ${err.message || String(err)}`, timestamp: Date.now() }] });
     } finally {
       setIsLoading(false);
@@ -429,6 +443,31 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       <style>{`
         @keyframes progress-minimal { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
         .animate-progress-minimal { animation: progress-minimal 3.5s infinite cubic-bezier(0.4, 0, 0.2, 1); }
+        
+        @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin-slow { animation: spin-slow 12s linear infinite; }
+        
+        @keyframes spin-reverse-medium { from { transform: rotate(360deg); } to { transform: rotate(0deg); } }
+        .animate-spin-reverse-medium { animation: spin-reverse-medium 8s linear infinite; }
+        
+        @keyframes float { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-10px) rotate(5deg); } }
+        .animate-float { animation: float 6s ease-in-out infinite; }
+        
+        @keyframes pulse-slow { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.1); } }
+        .animate-pulse-slow { animation: pulse-slow 4s ease-in-out infinite; }
+        
+        @keyframes ping-slow { 0% { transform: scale(1); opacity: 0.8; } 70%, 100% { transform: scale(2); opacity: 0; } }
+        .animate-ping-slow { animation: ping-slow 3s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+        @keyframes orbit-1 { from { transform: rotate(0deg) translateX(40px) rotate(0deg); } to { transform: rotate(360deg) translateX(40px) rotate(-360deg); } }
+        .animate-orbit-1 { animation: orbit-1 10s linear infinite; }
+        
+        @keyframes orbit-2 { from { transform: rotate(120deg) translateX(35px) rotate(-120deg); } to { transform: rotate(480deg) translateX(35px) rotate(-480deg); } }
+        .animate-orbit-2 { animation: orbit-2 15s linear infinite; }
+        
+        @keyframes orbit-3 { from { transform: rotate(240deg) translateX(45px) rotate(-240deg); } to { transform: rotate(600deg) translateX(45px) rotate(-600deg); } }
+        .animate-orbit-3 { animation: orbit-3 20s linear infinite; }
+
         @keyframes breathing-core { 0%, 100% { transform: scale(0.8); opacity: 0.1; } 50% { transform: scale(1.4); opacity: 0.3; } }
         .animate-breathing-core { animation: breathing-core 6s ease-in-out infinite; }
         @keyframes spin-extremely-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

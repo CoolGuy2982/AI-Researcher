@@ -5,7 +5,7 @@ import path from 'path';
 
 export const executeRouter = Router();
 
-const ALLOWED_COMMANDS = ['python', 'python3', 'pip', 'pip3', 'jupyter', 'ls', 'cat', 'head', 'tail'];
+const ALLOWED_COMMANDS = ['python', 'python3', 'pip', 'pip3', 'jupyter', 'ls', 'cat', 'head', 'tail', 'sh', 'bash'];
 const MAX_TIMEOUT = 5 * 60 * 1000;
 
 executeRouter.post('/:id/execute', (req: Request, res: Response) => {

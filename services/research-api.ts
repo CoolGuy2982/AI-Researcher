@@ -128,7 +128,7 @@ export async function getFindings(experimentId: string): Promise<string | null> 
  * Execute a script and return SSE stream.
  */
 export async function executeScript(experimentId: string, command: string): Promise<ReadableStream<{ stream: string; line: string; code?: number }>> {
-  const response = await fetch(`/api/workspace/${experimentId}/execute`, {
+  const response = await fetch(`/api/execute/${experimentId}/execute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command }),
