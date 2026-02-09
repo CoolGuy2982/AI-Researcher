@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Experiment, ExperimentStatus, ResearchExecutionStatus, Message, GraphNode, GraphEdge, ToolActivity, CliStreamEvent } from '../types';
 import { createRefinementChat } from '../services/gemini';
@@ -441,7 +440,19 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
 
           case 'done': {
             const finalStatus = event.status === 'completed' ? ResearchExecutionStatus.COMPLETED : ResearchExecutionStatus.FAILED;
-            const findings = await getFindings(exp.id);
+            
+            // Retry fetching findings to ensure we capture the file if it was just written
+            let findings = await getFindings(exp.id);
+            
+            if (!findings && finalStatus === ResearchExecutionStatus.COMPLETED) {
+              // Poll briefly to handle filesystem latency
+              for (let i = 0; i < 5; i++) {
+                await new Promise(r => setTimeout(r, 1000));
+                findings = await getFindings(exp.id);
+                if (findings) break;
+              }
+            }
+
             onUpdate({
               ...exp,
               executionStatus: finalStatus,
