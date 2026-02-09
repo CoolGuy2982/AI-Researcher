@@ -1,11 +1,11 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-// Use an absolute path that works both locally and in Docker
-// In Docker, the app lives in /app
-const WORKSPACE_ROOT = process.env.NODE_ENV === 'production' 
-  ? '/app/workspace' 
-  : path.resolve(process.cwd(), '../workspace');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// FORCE an absolute path inside the app directory for Docker compatibility
+const WORKSPACE_ROOT = path.resolve(__dirname, '../../../workspace');
 
 export interface FileTreeNode {
   name: string;
@@ -37,6 +37,7 @@ export async function ensureWorkspace(experimentId: string): Promise<string> {
 
 export async function scaffoldWorkspace(experimentId: string, context: WorkspaceContext): Promise<void> {
   const wsPath = await ensureWorkspace(experimentId);
+
   const dirs = ['experiments', 'data', 'figures', 'reports', 'literature', 'notebooks'];
   await Promise.all(dirs.map(d => fs.mkdir(path.join(wsPath, d), { recursive: true })));
 
@@ -59,8 +60,6 @@ export async function scaffoldWorkspace(experimentId: string, context: Workspace
     }
   }, null, 2));
 
-  // Note: Ensure your templates directory is copied in Dockerfile
-  // This assumes the dist structure is flat or templates are available
   const template = `# Research Experiment: ${context.experimentTitle}\n\nHypothesis: ${context.hypothesis}\n\nContext: ${context.chatSummary}`;
   await fs.writeFile(path.join(wsPath, 'GEMINI.md'), template);
 }
