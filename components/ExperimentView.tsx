@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Experiment, ExperimentStatus, ResearchExecutionStatus, Message, GraphNode, GraphEdge, ToolActivity, CliStreamEvent } from '../types';
-import { createRefinementChat, performDeepResearchStream } from '../services/gemini';
+import { createRefinementChat } from '../services/gemini';
 import { startResearch, sendResearchChat, abortResearch, getFindings, executeScript } from '../services/research-api';
 import KnowledgeGraph from './KnowledgeGraph';
 import MarkdownRenderer from './MarkdownRenderer';
@@ -221,10 +221,9 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       
       onUpdate(finalExp);
 
-      // CRITICAL FIX: Trigger Deep Research and STOP this function.
-      // Do NOT trigger coding agent here; executeDeepResearch will trigger Phase 2.
+      // TRIGGER PHASE 2: Coder Agent execution directly (Deep Research phase removed)
       if (latestStatus === ExperimentStatus.RESEARCHING) {
-        await executeDeepResearch(finalExp, deepResearchHypothesis);
+        await executeResearch(finalExp, deepResearchHypothesis);
       }
       
     } catch (err: any) {
@@ -232,59 +231,6 @@ const ExperimentView: React.FC<ExperimentViewProps> = ({ experiment, onUpdate })
       onUpdate({ ...experiment, chatHistory: [...experiment.chatHistory, { id: crypto.randomUUID(), role: 'model', content: `Synthesis interrupted: ${err.message || String(err)}`, timestamp: Date.now() }] });
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const executeDeepResearch = async (exp: Experiment, hypothesis: string) => {
-    let fullText = "";
-    let thoughts = "";
-
-    try {
-      const aistudio = (window as any).aistudio;
-      if (aistudio && !(await aistudio.hasSelectedApiKey())) { await handleEntityNotFound(); return; }
-
-      // Get the current chat history for context
-      const context = exp.chatHistory.map(m => `${m.role}: ${m.content}`).join('\n');
-      const stream = await performDeepResearchStream(context, hypothesis);
-      
-      for await (const chunk of stream) {
-        if (!chunk) continue;
-        
-        if (chunk.event_type === 'content.delta') {
-          if (chunk.delta.type === 'text') {
-            fullText += chunk.delta.text;
-          } else if (chunk.delta.type === 'thought_summary') {
-            thoughts = chunk.delta.content?.text || thoughts;
-          }
-        }
-
-        onUpdate({
-          ...exp,
-          researchProgress: { browsing: [], thoughts: thoughts || "Autonomous synthesis in progress..." },
-          lastModifiedAt: Date.now()
-        });
-      }
-
-      const finalWithReport: Experiment = {
-        ...exp,
-        researchProgress: undefined,
-        report: {
-          summary: "Frontier Synthesis Complete",
-          hypothesis,
-          fullContent: fullText || "Autonomous research protocol concluded. Synthesis refined.",
-          citations: []
-        },
-        lastModifiedAt: Date.now()
-      };
-
-      onUpdate(finalWithReport);
-      
-      // TRIGGER PHASE 2: Coder Agent execution
-      await executeResearch(finalWithReport, hypothesis);
-
-    } catch (err: any) {
-      console.error("Deep research failure:", err);
-      onUpdate({ ...exp, status: ExperimentStatus.FAILED });
     }
   };
 

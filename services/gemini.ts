@@ -1,5 +1,4 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
-import { performDeepResearchStream as backendDeepResearch } from "./research-api";
 
 const getClient = () => {
   const apiKey = (window as any).ENV?.GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
@@ -88,26 +87,3 @@ export const createRefinementChat = () => {
   chat.sendMessage = (args: any) => withRetry(() => originalSendMessage(args));
   return chat;
 };
-
-/**
- * Performs deep research synthesis using the backend proxy to avoid CORS issues.
- */
-export async function performDeepResearchStream(context: string, hypothesis: string): Promise<AsyncIterable<any>> {
-  const stream = await backendDeepResearch(context, hypothesis);
-  
-  // Wrap ReadableStream to be an AsyncIterable for the frontend logic
-  return {
-    async *[Symbol.asyncIterator]() {
-      const reader = stream.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          yield value;
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    }
-  };
-}

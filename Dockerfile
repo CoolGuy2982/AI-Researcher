@@ -1,6 +1,15 @@
 # Use Node 20 as the base
 FROM node:20-slim
 
+# Install system dependencies (including Python)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python-is-python3 \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install the Gemini CLI globally so your backend can find it
 RUN npm install -g @google/gemini-cli
 

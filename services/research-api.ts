@@ -44,32 +44,6 @@ function parseSseStream<T = any>(body: ReadableStream<Uint8Array>): ReadableStre
 }
 
 /**
- * Initiates Phase 1: Deep Research Synthesis via backend proxy.
- */
-export async function performDeepResearchStream(context: string, hypothesis: string): Promise<ReadableStream<any>> {
-  const response = await fetch('/api/research/deep-research', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      input: `Perform an exhaustive research synthesis for the following hypothesis: "${hypothesis}". Context: ${context}`,
-      agent: 'deep-research-pro-preview-12-2025',
-      agent_config: {
-        type: 'deep-research',
-        thinking_summaries: 'auto'
-      }
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Deep Research failed (${response.status}): ${text}`);
-  }
-  if (!response.body) throw new Error('No response body');
-
-  return parseSseStream(response.body);
-}
-
-/**
  * Start Phase 2: Coding & Execution.
  */
 export async function startResearch(params: StartResearchParams): Promise<ReadableStream<CliStreamEvent>> {
