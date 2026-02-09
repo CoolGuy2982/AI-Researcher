@@ -5,30 +5,27 @@ import path from 'path';
 
 export const workspaceRouter = Router();
 
-// GET /api/workspace/:id/tree — file tree
 workspaceRouter.get('/:id/tree', async (req: Request, res: Response) => {
   try {
-const tree = await listWorkspaceFiles(req.params.id as string);
+    const tree = await listWorkspaceFiles(req.params.id as string);
     res.json({ tree });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET /api/workspace/:id/file?path=<relative> — read file or serve image
 workspaceRouter.get('/:id/file', async (req: Request, res: Response) => {
-const relativePath = req.query.path as string;
+  const relativePath = req.query.path as string;
   if (!relativePath) {
     res.status(400).json({ error: 'path query parameter required' });
     return;
   }
 
   try {
-    const file = await readWorkspaceFile(req.params.id, relativePath);
+    const file = await readWorkspaceFile(req.params.id as string, relativePath);
 
     if (file.mimeType.startsWith('image/')) {
-      // Serve raw image binary
-      const wsPath = getWorkspacePath(req.params.id);
+      const wsPath = getWorkspacePath(req.params.id as string);
       const filePath = path.resolve(wsPath, relativePath);
       if (!filePath.startsWith(wsPath)) {
         res.status(403).json({ error: 'Path traversal detected' });
@@ -56,9 +53,8 @@ const relativePath = req.query.path as string;
   }
 });
 
-// GET /api/workspace/:id/findings — read findings.md
 workspaceRouter.get('/:id/findings', async (req: Request, res: Response) => {
-  const findings = await readFindings(req.params.id);
+  const findings = await readFindings(req.params.id as string);
   if (!findings) {
     res.status(404).json({ error: 'findings.md not found' });
     return;
